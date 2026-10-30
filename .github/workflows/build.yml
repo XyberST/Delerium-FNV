@@ -1,0 +1,32 @@
+# Builds the 32-bit engine DLL and the 32-bit plugin on GitHub's Windows machines, so nothing needs installing locally.
+# Use: put this project in a GitHub repository, open the Actions tab, run "build", then download the DeliriumFNV artifact.
+name: build
+on: workflow_dispatch
+jobs:
+  win32:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the Delirium engine (skyrim branch)
+        run: git clone --depth 1 --branch skyrim https://github.com/YoucefNabil/delirium-physics.git engine
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+      - name: Build engine DLL (32-bit)
+        working-directory: engine
+        run: cargo build -p delirium-sdk --release --target i686-pc-windows-msvc
+      - name: Build plugin (32-bit, MSVC)
+        run: |
+          cmake -S . -B build -A Win32
+          cmake --build build --config Release
+      - name: Stage the game layout
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force stage/Data/NVSE/Plugins/DeliriumFNV | Out-Null
+          Copy-Item build/Release/DeliriumFNV.dll stage/Data/NVSE/Plugins/
+          Copy-Item data/* stage/Data/NVSE/Plugins/DeliriumFNV/
+          Copy-Item engine/target/i686-pc-windows-msvc/release/delirium_physics.dll stage/Data/NVSE/Plugins/DeliriumFNV/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeliriumFNV
+          path: stage

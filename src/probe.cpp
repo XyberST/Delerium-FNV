@@ -1,6 +1,7 @@
 #include "probe.h"
 #include "log.h"
 #include "ingame.h"
+#include "observe.h"
 #include <windows.h>
 #include <algorithm>
 #include <cstdio>
@@ -12,7 +13,8 @@ struct Probe {
 	char label[56]; uint32_t addr; bool vtable; uint32_t original;
 	volatile LONG count; volatile LONG firstTick;
 	uint32_t lastThis, lastRet, lastArg[3];
-	TraceRec* trace; uint32_t traceCap; volatile LONG traceSeq;     // optional ring buffer of the last calls
+	TraceRec* trace; uint32_t traceCap; volatile LONG traceSeq;
+	int role;                                                       // ProbeRole, for the observer     // optional ring buffer of the last calls
 };
 static const size_t kMaxProbes = 2048;
 static Probe g_probes[kMaxProbes]; static size_t g_n;
@@ -24,6 +26,7 @@ extern "C" void __cdecl LogHit(uint32_t idx, uint32_t thisPtr, uint32_t* stack) 
 	Probe& p = g_probes[idx];
 	if (InterlockedIncrement(&p.count) == 1) p.firstTick = (LONG)(GetTickCount() - (DWORD)g_markTick);
 	p.lastThis = thisPtr; p.lastRet = stack[0]; p.lastArg[0] = stack[1]; p.lastArg[1] = stack[2]; p.lastArg[2] = stack[3];
+	if (p.role) ObserveOnHit(p.role, thisPtr, stack + 0);
 	if (p.trace) {
 		LONG s = InterlockedIncrement(&p.traceSeq) - 1; TraceRec& r = p.trace[(uint32_t)s % p.traceCap];
 		r.ms = GetTickCount() - (DWORD)g_markTick; r.thisPtr = thisPtr; r.ret = stack[0]; r.a0 = stack[1]; r.a1 = stack[2]; r.a2 = stack[3];
@@ -106,6 +109,10 @@ int ProbesInstall(const char* ini) {
 		char key[64]; const char* eq = strchr(e, '='); if (!eq) continue;
 		snprintf(key, sizeof key, "%.*s", (int)(eq - e), e); uint32_t cap = ParseU32(eq + 1); if (cap < 8 || cap > 4096) cap = 64;
 		for (size_t i = 0; i < g_n; i++) if (strcmp(g_probes[i].label, key) == 0) { g_probes[i].trace = new TraceRec[cap](); g_probes[i].traceCap = cap; Log("trace enabled on %s (last %u calls)", key, cap); }
+	}
+	for (size_t i = 0; i < g_n; i++) {                                              // roles used by the observer
+		if (strcmp(g_probes[i].label, "Character[206]") == 0) g_probes[i].role = kRoleDamage;
+		if (strcmp(g_probes[i].label, "bhkBlendCollisionObject[44]") == 0) g_probes[i].role = kRoleMotionType;
 	}
 	return ok;
 }

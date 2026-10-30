@@ -1,5 +1,6 @@
 #include "ingame.h"
 #include "log.h"
+#include "observe.h"
 #include <windows.h>
 #include <cstdarg>
 #include <cstdio>
@@ -25,6 +26,7 @@ static void OnMessage(NVSEMessagingInterface::Message* m) {
 	case kMsg_PostLoadGame: case kMsg_NewGame: g_ready = true; g_frames = 0; g_lastShown = 0; break;   // a game world exists now
 	case kMsg_ExitToMainMenu: g_ready = false; break;
 	case kMsg_MainGameLoop:
+		if (g_ready) ObserveTick();
 		if (!g_ready || !g_canShow) break;
 		g_frames++;
 		if (g_frames < 150 || g_frames - g_lastShown < 200) break;                                       // wait ~2 s after load, then one message per ~3 s

@@ -4,6 +4,7 @@
 #include "probe.h"
 #include "engine.h"
 #include "ingame.h"
+#include "observe.h"
 #include <windows.h>
 #include <shlobj.h>
 #include <cstdio>
@@ -66,6 +67,7 @@ __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 		if (EngineLoad(g_engine, g_pluginDir)) IngameNotify(EngineSmokeTest(g_engine, g_pluginDir) ? "DeliriumFNV: engine smoke test finished (see log)" : "DeliriumFNV: engine smoke test FAILED (see log)");
 		else IngameNotify("DeliriumFNV: engine DLL not loaded - smoke test skipped");
 	}
+	if (GetPrivateProfileIntA("General", "Observe", 1, ini.c_str())) ObserveInit(&g_engine, EngineFittedBuild(), g_pluginDir.c_str());
 	if (GetPrivateProfileIntA("General", "Probes", 1, ini.c_str())) {
 		int n = ProbesInstall(ini.c_str());
 		Log("probes installed: %d", n);

@@ -22,6 +22,8 @@ bool EngineLoad(EngineApi& api, const std::string& dir) {
 static std::string ReadAll(const std::string& p) { std::ifstream f(p, std::ios::binary); std::stringstream s; s << f.rdbuf(); return s.str(); }
 static std::string Err(EngineApi& a) { char b[512] = {}; a.nm_last_error(b, sizeof b); return b; }
 
+static NmBuild* g_fitKept;
+NmBuild* EngineFittedBuild() { return g_fitKept; }
 bool EngineSmokeTest(EngineApi& api, const std::string& dir) {
 	DWORD t0 = GetTickCount();
 	std::string chr = dir + "\\skyrim_character.json";
@@ -49,6 +51,6 @@ bool EngineSmokeTest(EngineApi& api, const std::string& dir) {
 	for (int i = 0; i < 240; i++) api.nm_agent_step(a, w, 1.0f / 60.0f);
 	api.nm_agent_get_com(a, com, vel);
 	Log("smoke: after shot com=(%.2f %.2f %.2f) fallen=%d (expect z ~0.1, fallen 1); took %lu ms", com[0], com[1], com[2], api.nm_agent_has_fallen(a), (unsigned long)(GetTickCount() - t0));
-	api.nm_agent_destroy(a); api.nm_world_destroy(w); api.nm_build_destroy(fit); api.nm_build_destroy(base);
+	api.nm_agent_destroy(a); api.nm_world_destroy(w); g_fitKept = fit; api.nm_build_destroy(base);
 	return true;
 }

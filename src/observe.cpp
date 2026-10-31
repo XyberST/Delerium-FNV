@@ -13,11 +13,12 @@
 #include <vector>
 
 static const float kUnit = 0.0142875f;                        // metres per game unit
-static EngineApi* g_api; static NmBuild* g_fit; static bool g_enabled, g_drive = true; static Rig g_rig;
+static EngineApi* g_api; static NmBuild* g_fit; static bool g_enabled, g_drive = true, g_requireDead = true; static Rig g_rig;
 static volatile LONG g_lastDmgActor, g_lastDmgTick, g_pending, g_pendingTick;
 static int g_sessions; static DWORD g_lastSession;
 
 void ObserveSetDrive(bool on) { g_drive = on; }
+void ObserveSetRequireDead(bool on) { g_requireDead = on; }
 void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 	g_api = api; g_fit = (NmBuild*)fit; g_enabled = true;
 	std::string rp = std::string(dir) + "\\fnv_character_rig.txt";
@@ -100,6 +101,9 @@ static void Begin(uint32_t actor) {
 }
 
 static void StartAgent() {
+	uint32_t ls = 0xFFFF; Rd(S.actor + 0x108, &ls, 4);                    // Actor::lifeState: 0 alive, 1 dying, 2 dead, 3 unconscious (xNVSE header; logged so it can be checked)
+	Log("observe: actor life state one frame after the burst = %u", ls);
+	if (g_requireDead && ls != 1 && ls != 2) { Log("observe: not dying or dead (a knockdown, an essential NPC or a different state numbering), not taking over. Set RequireDead=0 in the ini to override."); End(); return; }
 	V3 p[21]; Q q[21];
 	if (!CapturePose(p, q)) { Log("observe: bone read failed at the second sample"); End(); return; }
 	LARGE_INTEGER c, f; QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f);

@@ -7,4 +7,5 @@ enum ProbeRole { kRoleNone = 0, kRoleDamage = 1, kRoleMotionType = 2 };
 void ObserveInit(EngineApi* api, void* fitBuild, const char* dir);   // fitBuild may be null (engine missing)
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack);
 void ObserveTick();
+void ObserveSetRequireDead(bool on);   // true: only take over actors whose life state is dying/dead
 void ObserveSetDrive(bool on);   // false: only watch, never write to the game

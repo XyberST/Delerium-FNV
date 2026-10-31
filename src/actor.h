@@ -16,3 +16,12 @@ bool NodeName(uint32_t node, std::string& out);
 bool NodeWorld(uint32_t node, WorldXform& w);
 // Breadth-first walk of plain NiNode children (max 600 nodes). Returns name -> node address.
 std::map<std::string, uint32_t> CollectBones(uint32_t root);
+
+// ---- phase 2b additions: node parent/local access, writing, children ----
+bool Wr(uint32_t addr, const void* in, size_t n);                    // WriteProcessMemory into our own process; false instead of a crash
+uint32_t NodeParent(uint32_t node);                                   // NiAVObject::m_parent @0x18, 0 if none
+bool NodeLocal(uint32_t node, WorldXform& l);                         // local R@0x34 T@0x58 S@0x64
+bool NodeIsPlainNode(uint32_t node);                                  // NiNode / BSFaceGenNiNode: has a child array
+bool NodeChildren(uint32_t node, std::vector<uint32_t>& out);
+bool NodeWriteWorld(uint32_t node, const WorldXform& w);
+bool NodeWriteLocal(uint32_t node, const WorldXform& l);

@@ -35,3 +35,18 @@ std::map<std::string, uint32_t> CollectBones(uint32_t root) {
 	}
 	return out;
 }
+
+bool Wr(uint32_t addr, const void* in, size_t n) {
+	if (addr < 0x10000) return false;
+	SIZE_T got = 0; return WriteProcessMemory(GetCurrentProcess(), (LPVOID)(uintptr_t)addr, in, n, &got) && got == n;
+}
+uint32_t NodeParent(uint32_t node) { uint32_t p = 0; return Rd32(node + 0x18, p) ? p : 0; }
+bool NodeLocal(uint32_t node, WorldXform& l) { return Rd(node + 0x34, l.R, 36) && Rd(node + 0x58, l.T, 12) && Rd(node + 0x64, &l.S, 4); }
+bool NodeIsPlainNode(uint32_t node) { uint32_t vt = 0; return Rd32(node, vt) && (vt == 0x109B5AC || vt == 0x10660DC); }
+bool NodeChildren(uint32_t node, std::vector<uint32_t>& out) {
+	uint32_t data = 0; uint16_t end = 0; if (!Rd32(node + 0xA0, data) || !Rd(node + 0xA6, &end, 2) || !data || end > 512) return false;
+	for (uint32_t i = 0; i < end; i++) { uint32_t c = 0; if (Rd32(data + 4 * i, c) && c) out.push_back(c); }
+	return true;
+}
+bool NodeWriteWorld(uint32_t node, const WorldXform& w) { return Wr(node + 0x68, w.R, 36) && Wr(node + 0x8C, w.T, 12) && Wr(node + 0x98, &w.S, 4); }
+bool NodeWriteLocal(uint32_t node, const WorldXform& l) { return Wr(node + 0x34, l.R, 36) && Wr(node + 0x58, l.T, 12) && Wr(node + 0x64, &l.S, 4); }

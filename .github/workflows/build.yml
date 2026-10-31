@@ -1,7 +1,10 @@
 # Builds the 32-bit engine DLL and the 32-bit plugin on GitHub's Windows machines, so nothing needs installing locally.
 # Use: put this project in a GitHub repository, open the Actions tab, run "build", then download the DeliriumFNV artifact.
 name: build
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
 jobs:
   win32:
     runs-on: windows-latest

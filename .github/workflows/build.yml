@@ -5,6 +5,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+permissions:
+  contents: write
 jobs:
   win32:
     runs-on: windows-latest
@@ -33,3 +35,11 @@ jobs:
         with:
           name: DeliriumFNV
           path: stage
+      - name: Publish as the "latest" release (easy download, no artifact login needed)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path stage/Data -DestinationPath DeliriumFNV.zip -Force
+          gh release delete latest --yes --cleanup-tag 2>$null
+          gh release create latest DeliriumFNV.zip --title "Latest build ${{ github.sha }}" --notes "Automatic build of commit ${{ github.sha }}. Unzip into the game folder or an MO2 mod." --target ${{ github.sha }}

@@ -21,6 +21,6 @@ struct NVSEMessagingInterface {
 	bool (*Dispatch)(PluginHandle sender, UInt32 messageType, void* data, UInt32 dataLen, const char* receiver);
 };
 // NVSE message ids (enum order in PluginAPI.h)
-enum { kMsg_ExitToMainMenu = 2, kMsg_PostLoadGame = 8, kMsg_NewGame = 14, kMsg_MainGameLoop = 20 };
+enum { kMsg_ExitToMainMenu = 2, kMsg_LoadGame = 3, kMsg_PreLoadGame = 6, kMsg_PostLoadGame = 8, kMsg_NewGame = 14, kMsg_MainGameLoop = 20 };
 #define NVSE_INFO_VERSION 1
 #define RUNTIME_VERSION_1_4_0_525 0x040020D0u

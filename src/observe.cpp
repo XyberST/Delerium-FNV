@@ -45,12 +45,12 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 // ---- sessions ----
 struct Session {
 	int phase = 0;                                              // 1 pose sampled, 2 simulating, 3 holding the final pose
-	uint32_t actor = 0, root = 0; WorldXform rootW{}; bool verbose = false; unsigned id = 0;
+	uint32_t actor = 0, root = 0, vt0 = 0, refId = 0; WorldXform rootW{}; bool verbose = false; unsigned id = 0;
 	uint32_t bone[21]{}, boneA[21]{}, boneB[21]{};
 	std::vector<uint32_t> order; std::map<uint32_t, int> rotPart, posPart;
 	V3 p0[21]{}; Q q0[21]{}; LARGE_INTEGER t0{}, last{};
 	NmWorld* world = nullptr; NmAgent* agent = nullptr;
-	unsigned frame = 0, calm = 0, hold = 0, redrives = 0, nWritten = 0, nPropagated = 0;
+	unsigned frame = 0, calm = 0, hold = 0, redrives = 0, nWritten = 0, nPropagated = 0, lifeCheck = 0;
 	float tr[21 * 7]{}, prev[21 * 3]{};
 	std::map<uint32_t, V3> wrote;                               // game-world bone translation we last wrote
 };
@@ -87,11 +87,13 @@ static void Begin(uint32_t actor) {
 	DWORD now = GetTickCount();
 	for (Session* a : g_active) if (a->actor == actor) return;
 	auto rc = g_recent.find(actor); if (rc != g_recent.end() && now - rc->second < 90000) return;         // dying then dead fire two bursts
-	if ((int)g_active.size() >= g_maxActors) return;
+	int sim = 0; for (Session* a : g_active) if (a->phase < 3) sim++;
+	if (sim >= g_maxActors) return;                                                        // only bodies still being simulated count against the limit
+	if (g_active.size() >= 24) for (size_t i = 0; i < g_active.size(); i++) if (g_active[i]->phase == 3) { Free(g_active[i]); delete g_active[i]; g_active.erase(g_active.begin() + i); break; }   // drop the oldest held pose
 	g_recent[actor] = now;
 	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->verbose = s->id <= 4;
 	if (s->verbose) Log("observe[%u]: death burst, actor %08X", s->id, actor);
-	s->root = ActorRoot(actor);
+	s->root = ActorRoot(actor); Rd(actor, &s->vt0, 4); Rd(actor + 0xC, &s->refId, 4);   // identity, to notice the memory being reused by another actor
 	if (!s->root || !NodeWorld(s->root, s->rootW)) { if (s->verbose) Log("observe[%u]: cannot read the actor's 3D", s->id); delete s; return; }
 	if (!g_rig.ok || !g_api || !g_fit) { delete s; return; }
 	auto bones = CollectBones(s->root);
@@ -186,6 +188,12 @@ static void Drive(Session& s, const float* tr) {
 
 // returns false when the session is finished
 static bool Step(Session& s) {
+	uint32_t vt = 0, rid = 0;
+	if (!Rd(s.actor, &vt, 4) || vt != s.vt0 || !Rd(s.actor + 0xC, &rid, 4) || rid != s.refId) { if (s.verbose) Log("observe[%u]: the actor's memory now holds something else, session over", s.id); return false; }
+	if (++s.lifeCheck % 15 == 0 && g_requireDead) {                                          // revived, reloaded or replaced by a living actor: stop touching it
+		uint32_t ls = 0xFFFF; Rd(s.actor + 0x108, &ls, 4);
+		if (ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: actor is no longer dying or dead (life state %u), session over", s.id, ls); return false; }
+	}
 	if (ActorRoot(s.actor) != s.root) { if (s.verbose) Log("observe[%u]: actor or its 3D is gone, session over", s.id); return false; }
 	if (s.phase == 1) { if (!StartAgent(s)) return false; return true; }
 	if (s.phase == 2) {
@@ -211,6 +219,12 @@ static bool Step(Session& s) {
 	if (Deviation(s) > 0.05f) { if (g_drive) Drive(s, s.tr); s.redrives++; }
 	if (s.hold >= (unsigned)(g_holdSeconds * 60)) { if (s.verbose) Log("observe[%u]: hold finished (%u re-writes)", s.id, s.redrives); return false; }
 	return true;
+}
+
+void ObserveReset() {                                          // save load, new game, exit to menu: every actor pointer we hold becomes invalid
+	for (Session* s : g_active) { Free(s); delete s; }
+	if (!g_active.empty()) Log("observe: game state changed, released %u sessions", (unsigned)g_active.size());
+	g_active.clear(); g_recent.clear(); g_qr = g_qw; g_lastQ = 0; g_lastDmgActor = 0;
 }
 
 void ObserveTick() {

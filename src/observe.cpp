@@ -48,8 +48,9 @@ static volatile LONG g_q[16], g_qw, g_qr; static volatile LONG g_lastQ, g_lastQT
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	if (!g_enabled) return;
 	DWORD now = GetTickCount();
+	if (role == kRoleWorld) { uint32_t vt = 0; if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); return; }   // any call on a bhkWorld tells us the physics world
 	if (role == kRolePick) {
-		PickSetWorld(thisPtr);
+		{ uint32_t vt = 0; if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); }
 		LONG n = InterlockedIncrement(&g_pickCalls);
 		if (n % 40 == 1 && g_pickCount < 6) { PickSample& s = g_pick[g_pickCount]; s.world = thisPtr; s.data = stack[1]; if (Rd(stack[1], s.w, sizeof s.w)) InterlockedIncrement(&g_pickCount); }
 		return;
@@ -69,6 +70,7 @@ struct Session {
 	uint32_t actor = 0, root = 0, vt0 = 0, refId = 0; WorldXform rootW{}; bool verbose = false; unsigned id = 0;
 	uint32_t bone[21]{}, boneA[21]{}, boneB[21]{};
 	std::vector<uint32_t> order; std::map<uint32_t, int> rotPart, posPart;
+	struct NodeId { uint32_t node, parent, name; }; std::vector<NodeId> ids; unsigned warm = 0;
 	V3 p0[21]{}; Q q0[21]{}; LARGE_INTEGER t0{}, last{};
 	NmWorld* world = nullptr; NmAgent* agent = nullptr;
 	unsigned frame = 0, calm = 0, hold = 0, redrives = 0, nWritten = 0, nPropagated = 0, lifeCheck = 0;
@@ -146,6 +148,9 @@ static void Begin(uint32_t actor) {
 	std::stable_sort(s->order.begin(), s->order.end(), [](uint32_t a, uint32_t b) { return Depth(a) < Depth(b); });
 	V3 p[21]; Q q[21];
 	if (!CapturePose(*s, p, q)) { if (s->verbose) Log("observe[%u]: bone read failed", s->id); delete s; return; }
+	{ std::map<uint32_t, bool> seen;                                          // remember what each cached bone looked like, to notice the game replacing or freeing it
+	  auto add = [&](uint32_t n) { if (seen[n]) return; seen[n] = true; Session::NodeId id{ n, NodeParent(n), 0 }; Rd(n + 8, &id.name, 4); s->ids.push_back(id); };
+	  for (int i = 0; i < 21; i++) { add(s->bone[i]); add(s->boneA[i]); add(s->boneB[i]); } }
 	memcpy(s->p0, p, sizeof p); memcpy(s->q0, q, sizeof q);
 	if (s->verbose) RayTest(*s);
 	
@@ -153,12 +158,11 @@ static void Begin(uint32_t actor) {
 	g_active.push_back(s);
 }
 
-static bool StartAgent(Session& s) {
+static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c) {
 	uint32_t ls = 0xFFFF; Rd(s.actor + 0x108, &ls, 4);                    // Actor::lifeState: 1 dying, 2 dead
 	if (s.verbose) Log("observe[%u]: actor %08X life state %u one frame after the burst", s.id, s.actor, ls);
 	if (g_requireDead && ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: not dying or dead, leaving it to the game", s.id); return false; }
-	V3 p[21]; Q q[21]; if (!CapturePose(s, p, q)) return false;
-	LARGE_INTEGER c, f; QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f);
+	LARGE_INTEGER f; QueryPerformanceFrequency(&f);
 	float dt = (float)((double)(c.QuadPart - s.t0.QuadPart) / (double)f.QuadPart); dt = std::min(std::max(dt, 1.0f / 200), 1.0f / 10);
 	float st[21 * 13], zp[21 * 7]; V3 vel[21];
 	for (int i = 0; i < 21; i++) {
@@ -192,16 +196,18 @@ static void Drive(Session& s, const float* tr) {
 	std::map<uint32_t, WorldXform> cur; unsigned ok = 0;
 	for (uint32_t n : s.order) {
 		int rp = s.rotPart[n], pp = s.posPart[n];
-		WorldXform now; if (!NodeWorld(n, now)) continue;
+		WorldXform now, l0; if (!NodeWorld(n, now) || !NodeLocal(n, l0)) continue;
 		V3 joint = P[pp] + rot(Qp[pp], g_rig.part[pp].anchor);
 		float Rb[9]; toMat(norm(mul(Qp[rp], g_rig.part[rp].offset)), Rb);
 		WorldXform w{}; mulMM(s.rootW.R, Rb, w.R);
-		V3 t = mulMV(s.rootW.R, joint * (s.rootW.S / kUnit)); w.T[0] = s.rootW.T[0] + t.x; w.T[1] = s.rootW.T[1] + t.y; w.T[2] = s.rootW.T[2] + t.z; w.S = now.S;
+		V3 t = mulMV(s.rootW.R, joint * (s.rootW.S / kUnit)); w.T[0] = s.rootW.T[0] + t.x; w.T[1] = s.rootW.T[1] + t.y; w.T[2] = s.rootW.T[2] + t.z; w.S = now.S;       // scale is fixed up below from the parent and the local scale
 		uint32_t par = NodeParent(n); WorldXform pw{};
 		auto it = cur.find(par); if (it != cur.end()) pw = it->second; else if (!par || !NodeWorld(par, pw)) continue;
+		if (l0.S < 0.02f) { cur[n] = now; continue; }                                    // the game scaled this part away (dismembered): leave it hidden, do not stretch it back
+		w.S = pw.S * l0.S;
 		WorldXform l{}; mulMTM(pw.R, w.R, l.R);
 		V3 d{ w.T[0] - pw.T[0], w.T[1] - pw.T[1], w.T[2] - pw.T[2] }; float ips = pw.S != 0 ? 1.0f / pw.S : 1.0f;
-		V3 lt = mulMTV(pw.R, d) * ips; l.T[0] = lt.x; l.T[1] = lt.y; l.T[2] = lt.z; l.S = pw.S != 0 ? w.S / pw.S : 1.0f;
+		V3 lt = mulMTV(pw.R, d) * ips; l.T[0] = lt.x; l.T[1] = lt.y; l.T[2] = lt.z; l.S = l0.S;                                          // keep the game's local scale
 		if (NodeWriteWorld(n, w) && NodeWriteLocal(n, l)) { cur[n] = w; s.wrote[n] = { w.T[0], w.T[1], w.T[2] }; ok++; }
 	}
 	s.nWritten = ok;
@@ -223,6 +229,14 @@ static void Drive(Session& s, const float* tr) {
 	s.nPropagated = prop;
 }
 
+static bool NodesStillValid(const Session& s) {                  // a freed or replaced bone (dismemberment swaps parts of the skeleton) must never be written to
+	for (const auto& id : s.ids) {
+		uint32_t vt = 0, nm = 0;
+		if (!Rd(id.node, &vt, 4) || vt != 0x109B5AC || NodeParent(id.node) != id.parent || !Rd(id.node + 8, &nm, 4) || nm != id.name) return false;
+	}
+	return true;
+}
+
 // returns false when the session is finished
 static bool Step(Session& s) {
 	uint32_t vt = 0, rid = 0;
@@ -232,7 +246,13 @@ static bool Step(Session& s) {
 		if (ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: actor is no longer dying or dead (life state %u), session over", s.id, ls); return false; }
 	}
 	if (ActorRoot(s.actor) != s.root) { if (s.verbose) Log("observe[%u]: actor or its 3D is gone, session over", s.id); return false; }
-	if (s.phase == 1) { if (!StartAgent(s)) return false; return true; }
+	if (!NodesStillValid(s)) { if (s.verbose) Log("observe[%u]: a bone of this actor was replaced or freed (dismemberment or unload), session over", s.id); return false; }
+	if (s.phase == 1) {                                                                      // let the game's own ragdoll run a few frames so its kill impulse shows up as velocity
+		V3 p[21]; Q q[21]; LARGE_INTEGER c; QueryPerformanceCounter(&c);
+		if (!CapturePose(s, p, q)) return false;
+		if (++s.warm < 4) { memcpy(s.p0, p, sizeof p); memcpy(s.q0, q, sizeof q); s.t0 = c; return true; }
+		return StartAgent(s, p, q, c);
+	}
 	if (s.phase == 2) {
 		LARGE_INTEGER c, f; QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f);
 		float dt = (float)((double)(c.QuadPart - s.last.QuadPart) / (double)f.QuadPart); s.last = c; dt = std::min(std::max(dt, 1.0f / 120), 1.0f / 20);

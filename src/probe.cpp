@@ -121,6 +121,7 @@ int ProbesInstall(const char* ini) {
 		if (strcmp(g_probes[i].label, "Character[206]") == 0) g_probes[i].role = kRoleDamage;
 		if (strcmp(g_probes[i].label, "bhkBlendCollisionObject[44]") == 0) g_probes[i].role = kRoleMotionType;
 		if (strcmp(g_probes[i].label, "bhkWorld[50]") == 0) g_probes[i].role = kRolePick;
+		else if (strncmp(g_probes[i].label, "bhkWorld[", 9) == 0) g_probes[i].role = kRoleWorld;
 	}
 	return ok;
 }

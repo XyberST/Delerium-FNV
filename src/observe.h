@@ -3,7 +3,7 @@
 #pragma once
 #include "engine.h"
 #include <cstdint>
-enum ProbeRole { kRoleNone = 0, kRoleDamage = 1, kRoleMotionType = 2, kRolePick = 3 };
+enum ProbeRole { kRoleNone = 0, kRoleDamage = 1, kRoleMotionType = 2, kRolePick = 3, kRoleWorld = 4 };
 void ObserveInit(EngineApi* api, void* fitBuild, const char* dir);   // fitBuild may be null (engine missing)
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack);
 void ObserveTick();

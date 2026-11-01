@@ -3,10 +3,16 @@
 #include <deque>
 #include <cstring>
 
+#ifdef _MSC_VER
+// A fault inside the copy is caught and reported as a failed read. Far cheaper than a system call per access.
+static bool Copy(void* dst, const void* src, size_t n) { __try { memcpy(dst, src, n); return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
+bool Rd(uint32_t addr, void* out, size_t n) { return addr >= 0x10000 && Copy(out, (const void*)(uintptr_t)addr, n); }
+#else
 bool Rd(uint32_t addr, void* out, size_t n) {
 	if (addr < 0x10000) return false;
 	SIZE_T got = 0; return ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(uintptr_t)addr, out, n, &got) && got == n;
 }
+#endif
 static bool Rd32(uint32_t a, uint32_t& v) { return Rd(a, &v, 4); }
 uint32_t ActorRoot(uint32_t actor) {
 	uint32_t rs = 0, root = 0;
@@ -36,10 +42,14 @@ std::map<std::string, uint32_t> CollectBones(uint32_t root) {
 	return out;
 }
 
+#ifdef _MSC_VER
+bool Wr(uint32_t addr, const void* in, size_t n) { return addr >= 0x10000 && Copy((void*)(uintptr_t)addr, in, n); }
+#else
 bool Wr(uint32_t addr, const void* in, size_t n) {
 	if (addr < 0x10000) return false;
 	SIZE_T got = 0; return WriteProcessMemory(GetCurrentProcess(), (LPVOID)(uintptr_t)addr, in, n, &got) && got == n;
 }
+#endif
 uint32_t NodeParent(uint32_t node) { uint32_t p = 0; return Rd32(node + 0x18, p) ? p : 0; }
 bool NodeLocal(uint32_t node, WorldXform& l) { return Rd(node + 0x34, l.R, 36) && Rd(node + 0x58, l.T, 12) && Rd(node + 0x64, &l.S, 4); }
 bool NodeIsPlainNode(uint32_t node) { uint32_t vt = 0; return Rd32(node, vt) && (vt == 0x109B5AC || vt == 0x10660DC); }

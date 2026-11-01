@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 static EngineApi g_engine;
@@ -58,7 +59,7 @@ __declspec(dllexport) bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInf
 __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	Crumb("DeliriumFNV_3_load.txt", "Load called: nvse=%08X runtime=%08X", nvse->nvseVersion, nvse->runtimeVersion);
 	LogOpen((g_logDir + "\\DeliriumFNV.log").c_str());
-	Log("DeliriumFNV build phase2b-drive-r2 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
+	Log("DeliriumFNV build phase2c-multi loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
 	IngameInit(const_cast<NVSEInterface*>(nvse));
 	std::string ini = g_pluginDir + "\\DeliriumFNV.ini";
 	if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) ini = g_root + "\\DeliriumFNV.ini";   // also accept the ini beside the dll
@@ -67,12 +68,12 @@ __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 		if (EngineLoad(g_engine, g_pluginDir)) IngameNotify(EngineSmokeTest(g_engine, g_pluginDir) ? "DeliriumFNV: engine smoke test finished (see log)" : "DeliriumFNV: engine smoke test FAILED (see log)");
 		else IngameNotify("DeliriumFNV: engine DLL not loaded - smoke test skipped");
 	}
-	if (GetPrivateProfileIntA("General", "Observe", 1, ini.c_str())) { ObserveSetDrive(GetPrivateProfileIntA("General", "Drive", 1, ini.c_str()) != 0); ObserveSetRequireDead(GetPrivateProfileIntA("General", "RequireDead", 1, ini.c_str()) != 0); ObserveInit(&g_engine, EngineFittedBuild(), g_pluginDir.c_str()); Log("observer: armed, engine body %s. Kill an NPC to trigger it.", EngineFittedBuild() ? "ready" : "MISSING (skeleton logging only)"); }
+	if (GetPrivateProfileIntA("General", "Observe", 1, ini.c_str())) { ObserveSetDrive(GetPrivateProfileIntA("General", "Drive", 1, ini.c_str()) != 0); ObserveSetRequireDead(GetPrivateProfileIntA("General", "RequireDead", 1, ini.c_str()) != 0); { char b[32]; GetPrivateProfileStringA("General", "SimSeconds", "8", b, sizeof b, ini.c_str()); float sim = (float)atof(b); GetPrivateProfileStringA("General", "HoldSeconds", "300", b, sizeof b, ini.c_str()); ObserveSetLimits(GetPrivateProfileIntA("General", "MaxActors", 4, ini.c_str()), sim, (float)atof(b)); } ObserveInit(&g_engine, EngineFittedBuild(), g_pluginDir.c_str()); Log("observer: armed, engine body %s. Kill an NPC to trigger it.", EngineFittedBuild() ? "ready" : "MISSING (skeleton logging only)"); }
 	if (GetPrivateProfileIntA("General", "Probes", 1, ini.c_str())) {
 		int n = ProbesInstall(ini.c_str());
 		Log("probes installed: %d", n);
 		IngameNotify("DeliriumFNV running: %d probes installed. Insert = mark, Delete = dump. Log: %s", n, LogPath());
-		if (n) ProbesStartHotkeys(GetPrivateProfileIntA("General", "MarkKey", 0x2D, ini.c_str()), GetPrivateProfileIntA("General", "DumpKey", 0x2E, ini.c_str()));
+		if (n && GetPrivateProfileIntA("General", "Hotkeys", 0, ini.c_str())) ProbesStartHotkeys(GetPrivateProfileIntA("General", "MarkKey", 0x2D, ini.c_str()), GetPrivateProfileIntA("General", "DumpKey", 0x2E, ini.c_str()));
 	}
 	return true;
 }

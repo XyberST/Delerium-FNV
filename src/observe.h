@@ -8,4 +8,5 @@ void ObserveInit(EngineApi* api, void* fitBuild, const char* dir);   // fitBuild
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack);
 void ObserveTick();
 void ObserveSetRequireDead(bool on);   // true: only take over actors whose life state is dying/dead
-void ObserveSetDrive(bool on);   // false: only watch, never write to the game
+void ObserveSetDrive(bool on);                                          // false: only watch, never write to the game
+void ObserveSetLimits(int maxActors, float simSeconds, float holdSeconds);

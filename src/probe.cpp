@@ -96,6 +96,13 @@ int ProbesInstall(const char* ini) {
 		}
 		Log("vtable probe %s @%08X: %d/%u slots hooked", key, vt, added, slots); ok += added;
 	}
+	n = GetPrivateProfileSectionA("SlotProbes", sect, sizeof sect, ini);          // Label=0xVTABLE,slot : single slots, the cheap way
+	for (const char* e = sect; n && *e; e += strlen(e) + 1) {
+		char key[64]; const char* eq = strchr(e, '='); if (!eq) continue;
+		snprintf(key, sizeof key, "%.*s", (int)(eq - e), e);
+		char* comma; uint32_t vt = strtoul(eq + 1, &comma, 0); if (*comma != ',') continue; uint32_t slot = ParseU32(comma + 1);
+		if (AddVtableSlot(key, vt + 4 * slot)) { ok++; Log("slot probe %s @%08X hooked", key, vt + 4 * slot); } else Log("slot probe %s NOT hooked", key);
+	}
 	n = GetPrivateProfileSectionA("Functions", sect, sizeof sect, ini);
 	for (const char* e = sect; n && *e; e += strlen(e) + 1) {                    // Label=0xADDR|55 8B EC ...
 		char key[64]; const char* eq = strchr(e, '='); if (!eq) continue;

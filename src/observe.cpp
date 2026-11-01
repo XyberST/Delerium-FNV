@@ -27,12 +27,31 @@ void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 	if (RigLoad(g_rig, rp)) Log("observe: rig loaded (21 parts)"); else Log("observe: rig %s NOT loaded; nothing will be driven", rp.c_str());
 }
 
+// ---- phase 3a: record real calls of the game's Havok pick (ray cast) function, to learn its argument block ----
+struct PickSample { uint32_t world, data; uint32_t w[44]; };
+static PickSample g_pick[6]; static volatile LONG g_pickCount, g_pickCalls; static bool g_pickDumped;
+static void PickDump() {
+	g_pickDumped = true; Log("pick: %ld calls seen; first %ld samples of the 0xB0-byte argument block follow (bhkWorld::vtable[50], this = world, arg0 = block)", g_pickCalls, g_pickCount);
+	for (int i = 0; i < g_pickCount && i < 6; i++) {
+		const PickSample& s = g_pick[i]; Log("pick[%d] world=%08X block=%08X", i, s.world, s.data);
+		for (int k = 0; k < 44; k += 4) {
+			float f[4]; memcpy(f, &s.w[k], 16);
+			Log("  +%02X: %08X %08X %08X %08X | %10.3f %10.3f %10.3f %10.3f", k * 4, s.w[k], s.w[k + 1], s.w[k + 2], s.w[k + 3], f[0], f[1], f[2], f[3]);
+		}
+	}
+}
+
 // ---- death detection (runs inside the probe thunks: tiny and lock-free) ----
 static volatile LONG g_lastDmgActor, g_lastDmgTick;
 static volatile LONG g_q[16], g_qw, g_qr; static volatile LONG g_lastQ, g_lastQTick;
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	if (!g_enabled) return;
 	DWORD now = GetTickCount();
+	if (role == kRolePick) {
+		LONG n = InterlockedIncrement(&g_pickCalls);
+		if (n % 40 == 1 && g_pickCount < 6) { PickSample& s = g_pick[g_pickCount]; s.world = thisPtr; s.data = stack[1]; if (Rd(stack[1], s.w, sizeof s.w)) InterlockedIncrement(&g_pickCount); }
+		return;
+	}
 	if (role == kRoleDamage) { g_lastDmgActor = (LONG)thisPtr; g_lastDmgTick = (LONG)now; }
 	else if (role == kRoleMotionType && stack[1] == 1 /* dynamic */ && now - (DWORD)g_lastDmgTick <= 100) {
 		LONG a = g_lastDmgActor;
@@ -229,6 +248,7 @@ void ObserveReset() {                                          // save load, new
 
 void ObserveTick() {
 	if (!g_enabled) return;
+	if (g_pickCount >= 6 && !g_pickDumped) PickDump();
 	while (g_qr != g_qw) { uint32_t a = (uint32_t)g_q[g_qr & 15]; g_qr++; Begin(a); }
 	for (size_t i = 0; i < g_active.size();) {
 		if (Step(*g_active[i])) { i++; continue; }

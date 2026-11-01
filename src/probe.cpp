@@ -120,6 +120,7 @@ int ProbesInstall(const char* ini) {
 	for (size_t i = 0; i < g_n; i++) {                                              // roles used by the observer
 		if (strcmp(g_probes[i].label, "Character[206]") == 0) g_probes[i].role = kRoleDamage;
 		if (strcmp(g_probes[i].label, "bhkBlendCollisionObject[44]") == 0) g_probes[i].role = kRoleMotionType;
+		if (strcmp(g_probes[i].label, "bhkWorld[50]") == 0) g_probes[i].role = kRolePick;
 	}
 	return ok;
 }

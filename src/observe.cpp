@@ -3,6 +3,7 @@
 #include "rig.h"
 #include "mathx.h"
 #include "ingame.h"
+#include "pick.h"
 #include "log.h"
 #include <windows.h>
 #include <algorithm>
@@ -48,6 +49,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	if (!g_enabled) return;
 	DWORD now = GetTickCount();
 	if (role == kRolePick) {
+		PickSetWorld(thisPtr);
 		LONG n = InterlockedIncrement(&g_pickCalls);
 		if (n % 40 == 1 && g_pickCount < 6) { PickSample& s = g_pick[g_pickCount]; s.world = thisPtr; s.data = stack[1]; if (Rd(stack[1], s.w, sizeof s.w)) InterlockedIncrement(&g_pickCount); }
 		return;
@@ -102,6 +104,20 @@ static float Deviation(const Session& s) {                     // how far the ga
 	return dev;
 }
 
+// Phase 3b: does the game's ray cast see the ground under this actor? Tries two coordinate spaces and the two filters seen in real calls.
+static void RayTest(const Session& s) {
+	const uint32_t filters[2] = { 0x011F0025, 0x011D0025 }; const float kHavok = 0.0142875f;
+	Log("ray[%u]: bhkWorld %08X, actor root at game units (%.1f %.1f %.1f)", s.id, PickWorld(), s.rootW.T[0], s.rootW.T[1], s.rootW.T[2]);
+	for (int space = 0; space < 2; space++) for (int fi = 0; fi < 2; fi++) {
+		float k = space ? kHavok : 1.0f, r = 60.0f * k;
+		float from[3] = { s.rootW.T[0] * k, s.rootW.T[1] * k, s.rootW.T[2] * k + r }, to[3] = { s.rootW.T[0] * k, s.rootW.T[1] * k, s.rootW.T[2] * k - r };
+		bool hit = false; float fr = 1, nrm[3] = {};
+		if (!PickCast(from, to, filters[fi], hit, fr, nrm)) { Log("ray[%u] %s filter %08X: call not possible", s.id, space ? "havok-metres" : "game-units", filters[fi]); continue; }
+		float hz = (from[2] + (to[2] - from[2]) * fr) / k;
+		Log("ray[%u] %s filter %08X: hit=%d fraction=%.3f -> z=%.1f (root z %.1f) normal=(%.2f %.2f %.2f)", s.id, space ? "havok-metres" : "game-units", filters[fi], hit ? 1 : 0, fr, hz, s.rootW.T[2], nrm[0], nrm[1], nrm[2]);
+	}
+}
+
 static void Begin(uint32_t actor) {
 	DWORD now = GetTickCount();
 	for (Session* a : g_active) if (a->actor == actor) return;
@@ -131,6 +147,8 @@ static void Begin(uint32_t actor) {
 	V3 p[21]; Q q[21];
 	if (!CapturePose(*s, p, q)) { if (s->verbose) Log("observe[%u]: bone read failed", s->id); delete s; return; }
 	memcpy(s->p0, p, sizeof p); memcpy(s->q0, q, sizeof q);
+	if (s->verbose) RayTest(*s);
+	
 	LARGE_INTEGER c; QueryPerformanceCounter(&c); s->t0 = c; s->last = c; s->phase = 1;
 	g_active.push_back(s);
 }
@@ -248,7 +266,7 @@ void ObserveReset() {                                          // save load, new
 
 void ObserveTick() {
 	if (!g_enabled) return;
-	if (g_pickCount >= 6 && !g_pickDumped) PickDump();
+	(void)PickDump;
 	while (g_qr != g_qw) { uint32_t a = (uint32_t)g_q[g_qr & 15]; g_qr++; Begin(a); }
 	for (size_t i = 0; i < g_active.size();) {
 		if (Step(*g_active[i])) { i++; continue; }

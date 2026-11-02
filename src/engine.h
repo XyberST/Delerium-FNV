@@ -14,5 +14,7 @@ struct EngineApi {
 bool EngineLoad(EngineApi& api, const std::string& dir);
 // Builds the FNV body from <dir>\fnv_joints.txt + the character file, stands it on a floor for 3 s, shoots it, logs the result.
 bool EngineSmokeTest(EngineApi& api, const std::string& dir);
+// Builds only the fitted NVCS body (no simulation), keeps it for the observer. Returns false on failure.
+bool EngineBuildFit(EngineApi& api, const std::string& dir);
 // The NVCS-fitted body built by the smoke test, kept alive for the observer (null if the test did not run).
 NmBuild* EngineFittedBuild();

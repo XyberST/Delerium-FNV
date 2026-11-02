@@ -24,6 +24,22 @@ static std::string Err(EngineApi& a) { char b[512] = {}; a.nm_last_error(b, size
 
 static NmBuild* g_fitKept;
 NmBuild* EngineFittedBuild() { return g_fitKept; }
+bool EngineBuildFit(EngineApi& api, const std::string& dir) {
+	std::string chr = dir + "\\skyrim_character.json";
+	if (api.nm_init_character_file(chr.c_str()) < 0) { Log("engine: init character failed: %s", Err(api).c_str()); return false; }
+	std::string json = ReadAll(chr);
+	NmBuild* base = api.nm_build_from_character(json.c_str());
+	if (!base) { Log("engine: build failed: %s", Err(api).c_str()); return false; }
+	std::vector<float> joints; { std::ifstream f(dir + "\\fnv_joints.txt"); float v; while (f >> v) joints.push_back(v); }
+	if (joints.size() != 63) { Log("engine: fnv_joints.txt has %u floats, want 63", (unsigned)joints.size()); return false; }
+	std::vector<float> rots(21 * 4);
+	for (int i = 0; i < 21; i++) { float p[3], q[4]; api.nm_build_part_frame(base, i, p, q); memcpy(&rots[i * 4], q, sizeof q); }
+	NmBuild* fit = api.nm_build_remap(base, joints.data(), rots.data(), 0x1FFFFFu);
+	api.nm_build_destroy(base);
+	if (!fit) { Log("engine: remap failed: %s", Err(api).c_str()); return false; }
+	g_fitKept = fit; return true;
+}
+
 bool EngineSmokeTest(EngineApi& api, const std::string& dir) {
 	DWORD t0 = GetTickCount();
 	std::string chr = dir + "\\skyrim_character.json";

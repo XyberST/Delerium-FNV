@@ -28,33 +28,13 @@ void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 	if (RigLoad(g_rig, rp)) Log("observe: rig loaded (21 parts)"); else Log("observe: rig %s NOT loaded; nothing will be driven", rp.c_str());
 }
 
-// ---- phase 3a: record real calls of the game's Havok pick (ray cast) function, to learn its argument block ----
-struct PickSample { uint32_t world, data; uint32_t w[44]; };
-static PickSample g_pick[6]; static volatile LONG g_pickCount, g_pickCalls; static bool g_pickDumped;
-static void PickDump() {
-	g_pickDumped = true; Log("pick: %ld calls seen; first %ld samples of the 0xB0-byte argument block follow (bhkWorld::vtable[50], this = world, arg0 = block)", g_pickCalls, g_pickCount);
-	for (int i = 0; i < g_pickCount && i < 6; i++) {
-		const PickSample& s = g_pick[i]; Log("pick[%d] world=%08X block=%08X", i, s.world, s.data);
-		for (int k = 0; k < 44; k += 4) {
-			float f[4]; memcpy(f, &s.w[k], 16);
-			Log("  +%02X: %08X %08X %08X %08X | %10.3f %10.3f %10.3f %10.3f", k * 4, s.w[k], s.w[k + 1], s.w[k + 2], s.w[k + 3], f[0], f[1], f[2], f[3]);
-		}
-	}
-}
-
 // ---- death detection (runs inside the probe thunks: tiny and lock-free) ----
 static volatile LONG g_lastDmgActor, g_lastDmgTick;
 static volatile LONG g_q[16], g_qw, g_qr; static volatile LONG g_lastQ, g_lastQTick;
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	if (!g_enabled) return;
 	DWORD now = GetTickCount();
-	if (role == kRoleWorld) { uint32_t vt = 0; if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); return; }   // any call on a bhkWorld tells us the physics world
-	if (role == kRolePick) {
-		{ uint32_t vt = 0; if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); }
-		LONG n = InterlockedIncrement(&g_pickCalls);
-		if (n % 40 == 1 && g_pickCount < 6) { PickSample& s = g_pick[g_pickCount]; s.world = thisPtr; s.data = stack[1]; if (Rd(stack[1], s.w, sizeof s.w)) InterlockedIncrement(&g_pickCount); }
-		return;
-	}
+	if (role == kRoleWorld || role == kRolePick) { uint32_t vt = 0; if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); return; }   // any call on a bhkWorld tells us the physics world
 	if (role == kRoleDamage) { g_lastDmgActor = (LONG)thisPtr; g_lastDmgTick = (LONG)now; }
 	else if (role == kRoleMotionType && stack[1] == 1 /* dynamic */ && now - (DWORD)g_lastDmgTick <= 100) {
 		LONG a = g_lastDmgActor;
@@ -106,17 +86,18 @@ static float Deviation(const Session& s) {                     // how far the ga
 	return dev;
 }
 
-// Phase 3b: does the game's ray cast see the ground under this actor? Tries two coordinate spaces and the two filters seen in real calls.
-static void RayTest(const Session& s) {
-	const uint32_t filters[2] = { 0x011F0025, 0x011D0025 }; const float kHavok = 0.0142875f;
-	Log("ray[%u]: bhkWorld %08X, actor root at game units (%.1f %.1f %.1f)", s.id, PickWorld(), s.rootW.T[0], s.rootW.T[1], s.rootW.T[2]);
-	for (int space = 0; space < 2; space++) for (int fi = 0; fi < 2; fi++) {
-		float k = space ? kHavok : 1.0f, r = 60.0f * k;
-		float from[3] = { s.rootW.T[0] * k, s.rootW.T[1] * k, s.rootW.T[2] * k + r }, to[3] = { s.rootW.T[0] * k, s.rootW.T[1] * k, s.rootW.T[2] * k - r };
-		bool hit = false; float fr = 1, nrm[3] = {};
-		if (!PickCast(from, to, filters[fi], hit, fr, nrm)) { Log("ray[%u] %s filter %08X: call not possible", s.id, space ? "havok-metres" : "game-units", filters[fi]); continue; }
-		float hz = (from[2] + (to[2] - from[2]) * fr) / k;
-		Log("ray[%u] %s filter %08X: hit=%d fraction=%.3f -> z=%.1f (root z %.1f) normal=(%.2f %.2f %.2f)", s.id, space ? "havok-metres" : "game-units", filters[fi], hit ? 1 : 0, fr, hz, s.rootW.T[2], nrm[0], nrm[1], nrm[2]);
+// One-off calibration on the first corpse: which ray layers see the floor, and which also see the actor itself?
+static void CalibrateRays(const Session& s) {
+	if (!PickWorld()) { Log("ray: no physics world known yet, calibration skipped"); return; }
+	WorldXform pel; if (!NodeWorld(s.bone[0], pel)) return;
+	const float* r = s.rootW.T; Log("ray: bhkWorld %08X, root (%.1f %.1f %.1f), pelvis (%.1f %.1f %.1f)", PickWorld(), r[0], r[1], r[2], pel.T[0], pel.T[1], pel.T[2]);
+	for (uint32_t layer = 0; layer < 64; layer++) {
+		uint32_t filter = 0x011F0000u | layer; bool h1 = false, h2 = false; float f1 = 1, f2 = 1, n1[3], n2[3];
+		const float d0[3] = { r[0], r[1], r[2] + 60 }, d1[3] = { r[0], r[1], r[2] - 60 };                         // straight down through the feet
+		const float b0[3] = { pel.T[0] + 80, pel.T[1], pel.T[2] }, b1[3] = { pel.T[0] - 80, pel.T[1], pel.T[2] };   // sideways through the pelvis
+		bool ok1 = PickCast(d0, d1, filter, h1, f1, n1), ok2 = PickCast(b0, b1, filter, h2, f2, n2);
+		if (!ok1 || !ok2) { Log("ray: layer %02X call not possible", layer); continue; }
+		Log("ray: layer %02X  floor %s (z %.1f, normal z %.2f)  body-height %s (fraction %.2f)", layer, h1 ? "HIT " : "miss", r[2] + 60 - 120 * f1, n1[2], h2 ? "HIT " : "miss", f2);
 	}
 }
 
@@ -152,7 +133,7 @@ static void Begin(uint32_t actor) {
 	  auto add = [&](uint32_t n) { if (seen[n]) return; seen[n] = true; Session::NodeId id{ n, NodeParent(n), 0 }; Rd(n + 8, &id.name, 4); s->ids.push_back(id); };
 	  for (int i = 0; i < 21; i++) { add(s->bone[i]); add(s->boneA[i]); add(s->boneB[i]); } }
 	memcpy(s->p0, p, sizeof p); memcpy(s->q0, q, sizeof q);
-	if (s->verbose) RayTest(*s);
+	if (s->id == 1) CalibrateRays(*s);
 	
 	LARGE_INTEGER c; QueryPerformanceCounter(&c); s->t0 = c; s->last = c; s->phase = 1;
 	g_active.push_back(s);
@@ -286,7 +267,6 @@ void ObserveReset() {                                          // save load, new
 
 void ObserveTick() {
 	if (!g_enabled) return;
-	(void)PickDump;
 	while (g_qr != g_qw) { uint32_t a = (uint32_t)g_q[g_qr & 15]; g_qr++; Begin(a); }
 	for (size_t i = 0; i < g_active.size();) {
 		if (Step(*g_active[i])) { i++; continue; }

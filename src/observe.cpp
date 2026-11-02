@@ -4,6 +4,7 @@
 #include "mathx.h"
 #include "ingame.h"
 #include "pick.h"
+#include "ground.h"
 #include "log.h"
 #include <windows.h>
 #include <algorithm>
@@ -17,10 +18,14 @@ static const float kUnit = 0.0142875f;                        // metres per game
 static EngineApi* g_api; static NmBuild* g_fit; static Rig g_rig;
 static bool g_enabled, g_drive = true, g_requireDead = true;
 static int g_maxActors = 4; static float g_simSeconds = 8, g_holdSeconds = 300;
+static bool g_worldCollision, g_calibrate; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
+static float g_velScale = 1.0f, g_shotHealth = 1.0f;
 static int g_started;                                         // sessions begun this run (verbose logging for the first few only)
 
 void ObserveSetDrive(bool on) { g_drive = on; }
 void ObserveSetRequireDead(bool on) { g_requireDead = on; }
+void ObserveSetTuning(float velocityScale, float shotHealth) { g_velScale = std::max(0.0f, std::min(velocityScale, 4.0f)); g_shotHealth = std::max(0.1f, shotHealth); }
+void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell, int half) { g_worldCollision = collision; g_calibrate = calibrate; g_groundFilter = filter; g_groundCell = std::max(0.15f, cell); g_groundHalf = std::max(2, std::min(half, 16)); }
 void ObserveSetLimits(int maxActors, float simSeconds, float holdSeconds) { g_maxActors = std::max(1, std::min(maxActors, 8)); g_simSeconds = simSeconds; g_holdSeconds = holdSeconds; }
 void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 	g_api = api; g_fit = (NmBuild*)fit; g_enabled = true;
@@ -51,6 +56,7 @@ struct Session {
 	uint32_t bone[21]{}, boneA[21]{}, boneB[21]{};
 	std::vector<uint32_t> order; std::map<uint32_t, int> rotPart, posPart;
 	struct NodeId { uint32_t node, parent, name; }; std::vector<NodeId> ids; unsigned warm = 0;
+	GroundGrid* ground = nullptr; bool groundFailed = false; unsigned groundHits = 0;
 	V3 p0[21]{}; Q q0[21]{}; LARGE_INTEGER t0{}, last{};
 	NmWorld* world = nullptr; NmAgent* agent = nullptr;
 	unsigned frame = 0, calm = 0, hold = 0, redrives = 0, nWritten = 0, nPropagated = 0, lifeCheck = 0;
@@ -75,6 +81,7 @@ static bool CapturePose(const Session& s, V3* pos, Q* rq) {   // partRot = boneR
 	return true;
 }
 static void Free(Session* s) {
+	delete s->ground; s->ground = nullptr;
 	if (s->agent) g_api->nm_agent_destroy(s->agent);
 	if (s->world) g_api->nm_world_destroy(s->world);
 	s->agent = nullptr; s->world = nullptr;
@@ -99,6 +106,19 @@ static void CalibrateRays(const Session& s) {
 		if (!ok1 || !ok2) { Log("ray: layer %02X call not possible", layer); continue; }
 		Log("ray: layer %02X  floor %s (z %.1f, normal z %.2f)  body-height %s (fraction %.2f)", layer, h1 ? "HIT " : "miss", r[2] + 60 - 120 * f1, n1[2], h2 ? "HIT " : "miss", f2);
 	}
+}
+
+// Ground sampler: (x, y) in the actor's root frame, metres. Casts a vertical ray in game space and returns the height in the same frame.
+static bool GroundRayCb(void* ctx, float x, float y, float& z) {
+	Session& s = *(Session*)ctx; if (s.groundFailed) return false;
+	const float toUnits = (s.rootW.S != 0 ? s.rootW.S : 1.0f) / kUnit;                  // metres in the root frame -> game units
+	V3 w = mulMV(s.rootW.R, V3{ x * toUnits, y * toUnits, 0 });
+	const float top = s.rootW.T[2] + 1.4f * toUnits, bottom = s.rootW.T[2] - 1.3f * toUnits;   // from above the head to below the feet
+	float from[3] = { s.rootW.T[0] + w.x, s.rootW.T[1] + w.y, top }, to[3] = { from[0], from[1], bottom };
+	bool hit = false; float fr = 1, n[3];
+	if (!PickCast(from, to, g_groundFilter, hit, fr, n)) { s.groundFailed = true; return false; }
+	if (!hit || fr >= 1.0f) return false;
+	z = (top - (top - bottom) * fr - s.rootW.T[2]) / toUnits; s.groundHits++; return true;
 }
 
 static void Begin(uint32_t actor) {
@@ -133,8 +153,9 @@ static void Begin(uint32_t actor) {
 	  auto add = [&](uint32_t n) { if (seen[n]) return; seen[n] = true; Session::NodeId id{ n, NodeParent(n), 0 }; Rd(n + 8, &id.name, 4); s->ids.push_back(id); };
 	  for (int i = 0; i < 21; i++) { add(s->bone[i]); add(s->boneA[i]); add(s->boneB[i]); } }
 	memcpy(s->p0, p, sizeof p); memcpy(s->q0, q, sizeof q);
-	if (s->id == 1) CalibrateRays(*s);
+	if (g_calibrate && s->id == 1) CalibrateRays(*s);
 	
+	if (g_worldCollision && PickWorld()) { s->ground = new GroundGrid(); GroundInit(*s->ground, 0, 0, g_groundCell, g_groundHalf, -1.0f, 0.9f); }
 	LARGE_INTEGER c; QueryPerformanceCounter(&c); s->t0 = c; s->last = c; s->phase = 1;
 	g_active.push_back(s);
 }
@@ -147,24 +168,38 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c) {
 	float dt = (float)((double)(c.QuadPart - s.t0.QuadPart) / (double)f.QuadPart); dt = std::min(std::max(dt, 1.0f / 200), 1.0f / 10);
 	float st[21 * 13], zp[21 * 7]; V3 vel[21];
 	for (int i = 0; i < 21; i++) {
-		vel[i] = (p[i] - s.p0[i]) * (1.0f / dt);
+		vel[i] = (p[i] - s.p0[i]) * (g_velScale / dt);
 		Q dq = mul(q[i], conj(s.q0[i])); if (dq.w < 0) dq = { -dq.x, -dq.y, -dq.z, -dq.w };
 		float w = std::min(1.0f, dq.w), ang = 2 * std::acos(w), sn = std::sqrt(std::max(0.0f, 1 - w * w));
-		V3 av = sn > 1e-5f ? V3{ dq.x / sn, dq.y / sn, dq.z / sn } * (ang / dt) : V3{ 0, 0, 0 };
+		V3 av = sn > 1e-5f ? V3{ dq.x / sn, dq.y / sn, dq.z / sn } * (ang * g_velScale / dt) : V3{ 0, 0, 0 };
 		float* o = st + i * 13; o[0] = p[i].x; o[1] = p[i].y; o[2] = p[i].z; o[3] = q[i].x; o[4] = q[i].y; o[5] = q[i].z; o[6] = q[i].w;
 		o[7] = vel[i].x; o[8] = vel[i].y; o[9] = vel[i].z; o[10] = av.x; o[11] = av.y; o[12] = av.z;
 		float* t = zp + i * 7; t[0] = p[i].x; t[1] = p[i].y; t[2] = p[i].z; t[3] = q[i].x; t[4] = q[i].y; t[5] = q[i].z; t[6] = q[i].w;
 		s.prev[i * 3] = p[i].x; s.prev[i * 3 + 1] = p[i].y; s.prev[i * 3 + 2] = p[i].z;
 	}
 	const float zero[3] = { 0, 0, 0 };
-	s.world = g_api->nm_world_create(); g_api->nm_world_add_floor(s.world, 0, 0, 0, 100.0f);
+	s.world = g_api->nm_world_create();
+	bool meshed = false;
+	if (s.ground) {
+		int total = s.ground->total();
+		if (s.groundFailed || s.groundHits < (unsigned)(total / 10)) { if (s.verbose) Log("observe[%u]: ground: %u of %d rays hit, not trusted, using a flat floor (check GroundFilter)", s.id, s.groundHits, total); }
+		else {
+			std::vector<float> pos; std::vector<uint32_t> tri; float low = GroundMesh(*s.ground, 0.0f, pos, tri);
+			if (g_api->nm_world_add_mesh(s.world, pos.data(), (int)pos.size() / 3, tri.data(), (int)tri.size() / 3, nullptr) == 0) {
+				g_api->nm_world_add_floor(s.world, 0, 0, low - 0.02f, 100.0f); meshed = true;
+				if (s.verbose) Log("observe[%u]: ground mesh from %u/%d rays, lowest %.2f m, %d triangles", s.id, s.groundHits, total, low, (int)tri.size() / 3);
+			}
+		}
+		delete s.ground; s.ground = nullptr;
+	}
+	if (!meshed) g_api->nm_world_add_floor(s.world, 0, 0, 0, 100.0f);
 	s.agent = g_api->nm_agent_create(g_fit, zero, 0.0f, 0.3f);
 	if (!s.agent) return false;
 	g_api->nm_agent_set_mode(s.agent, NM_MODE_LEAD);
 	g_api->nm_agent_set_part_states(s.agent, st, 21); g_api->nm_agent_set_zero_pose(s.agent, zp, 21);
 	V3 chest = p[10], cv = vel[10]; float hs = std::sqrt(cv.x * cv.x + cv.y * cv.y);
 	float at[3] = { chest.x, chest.y, chest.z }, dir[3] = { hs > 0.05f ? cv.x / hs : 0.0f, hs > 0.05f ? cv.y / hs : 1.0f, 0.0f };
-	g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, 1.0f);
+	g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, g_shotHealth);
 	s.last = c; s.frame = 0; s.phase = 2;
 	if (s.verbose) Log("observe[%u]: Delirium body started (pelvis %.2f m/s, chest %.2f m/s)", s.id, len(vel[0]), len(vel[10]));
 	return true;
@@ -230,6 +265,7 @@ static bool Step(Session& s) {
 	if (!NodesStillValid(s)) { if (s.verbose) Log("observe[%u]: a bone of this actor was replaced or freed (dismemberment or unload), session over", s.id); return false; }
 	if (s.phase == 1) {                                                                      // let the game's own ragdoll run a few frames so its kill impulse shows up as velocity
 		V3 p[21]; Q q[21]; LARGE_INTEGER c; QueryPerformanceCounter(&c);
+		if (s.ground && !s.ground->done()) GroundWork(*s.ground, 120, GroundRayCb, &s);          // the grid is sampled over the warm-up frames to avoid a hitch
 		if (!CapturePose(s, p, q)) return false;
 		if (++s.warm < 4) { memcpy(s.p0, p, sizeof p); memcpy(s.q0, q, sizeof q); s.t0 = c; return true; }
 		return StartAgent(s, p, q, c);

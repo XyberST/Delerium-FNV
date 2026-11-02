@@ -50,7 +50,7 @@ __declspec(dllexport) bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInf
 __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	PickLogDir();
 	LogOpen((g_logDir + "\\DeliriumFNV.log").c_str());
-	Log("DeliriumFNV 0.4 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
+	Log("DeliriumFNV 0.5 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
 	IngameInit(const_cast<NVSEInterface*>(nvse));
 	std::string ini = g_pluginDir + "\\DeliriumFNV.ini";
 	if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) ini = g_root + "\\DeliriumFNV.ini";   // also accept the ini beside the dll
@@ -66,6 +66,9 @@ __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	char b[32]; GetPrivateProfileStringA("General", "SimSeconds", "8", b, sizeof b, ini.c_str()); float sim = (float)atof(b);
 	GetPrivateProfileStringA("General", "HoldSeconds", "300", b, sizeof b, ini.c_str());
 	ObserveSetLimits(GetPrivateProfileIntA("General", "MaxActors", 4, ini.c_str()), sim, (float)atof(b));
+	{ char v[32], hp[32]; GetPrivateProfileStringA("General", "VelocityScale", "1.0", v, sizeof v, ini.c_str()); GetPrivateProfileStringA("General", "ShotHealth", "1.0", hp, sizeof hp, ini.c_str()); ObserveSetTuning((float)atof(v), (float)atof(hp)); }
+	{ char f[32]; GetPrivateProfileStringA("World", "GroundFilter", "0x011F0025", f, sizeof f, ini.c_str()); char c[32]; GetPrivateProfileStringA("World", "GroundCell", "0.35", c, sizeof c, ini.c_str());
+	  ObserveSetWorld(GetPrivateProfileIntA("World", "Collision", 0, ini.c_str()) != 0, GetPrivateProfileIntA("World", "Calibrate", 0, ini.c_str()) != 0, (uint32_t)strtoul(f, nullptr, 0), (float)atof(c), GetPrivateProfileIntA("World", "GroundHalf", 10, ini.c_str())); }
 	ObserveInit(&g_engine, EngineFittedBuild(), g_pluginDir.c_str());
 	int n = ProbesInstall(ini.c_str());
 	Log("%d hooks installed", n);

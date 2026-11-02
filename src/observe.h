@@ -11,3 +11,8 @@ void ObserveReset();   // end every session (save load, new game, exit to menu)
 void ObserveSetRequireDead(bool on);   // true: only take over actors whose life state is dying/dead
 void ObserveSetDrive(bool on);                                          // false: only watch, never write to the game
 void ObserveSetLimits(int maxActors, float simSeconds, float holdSeconds);
+// World collision: sample the ground around each corpse with the game's ray cast and give Delirium that surface. Off by default.
+// Tuning: VelocityScale multiplies the speed inherited from the game's own ragdoll (1 = as the game did it); ShotHealth is how much
+// "health" the dying body is given (lower = collapses faster).
+void ObserveSetTuning(float velocityScale, float shotHealth);
+void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell, int half);

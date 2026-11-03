@@ -38,3 +38,28 @@ bool PickCast(const float from[3], const float to[3], uint32_t filter, bool& hit
 	fraction = *(float*)(blk + 0x40); const float* n = (const float*)(blk + 0x30); normal[0] = n[0]; normal[1] = n[1]; normal[2] = n[2];
 	return true;
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+static const uint32_t kTimeGlobalSeconds = 0x011F63A0;   // TimeGlobal (0x11F6394) + 0x0C: secondsPassed
+static const uint32_t kVatsMultFn = 0x009C8CC0, kVatsObj = 0x011F2250;   // the call xNVSE itself uses to scale game time for VATS
+#ifdef _MSC_VER
+typedef double(__thiscall* VatsFn)(void*);
+typedef void(__thiscall* MotionFn)(void*, int, int, int);
+static bool CallVats(double& out) { __try { out = ((VatsFn)(uintptr_t)kVatsMultFn)((void*)(uintptr_t)kVatsObj); return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
+static bool CallMotion(void* o, int t) { __try { ((MotionFn)(uintptr_t)0x00C823B0)(o, t, 0, 0); return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
+#else
+typedef double(__attribute__((thiscall)) * VatsFn)(void*);
+typedef void(__attribute__((thiscall)) * MotionFn)(void*, int, int, int);
+static bool CallVats(double& out) { out = ((VatsFn)(uintptr_t)kVatsMultFn)((void*)(uintptr_t)kVatsObj); return true; }
+static bool CallMotion(void* o, int t) { ((MotionFn)(uintptr_t)0x00C823B0)(o, t, 0, 0); return true; }
+#endif
+float GameFrameSeconds() {
+	float sp = 0; if (!Rd(kTimeGlobalSeconds, &sp, 4) || !(sp > 0.0f && sp < 0.5f)) return 0;
+	double vm = 1.0; if (!CallVats(vm) || !(vm > 0.0 && vm <= 4.0)) vm = 1.0;
+	return sp * (float)vm;
+}
+bool GameSetMotionType(uint32_t co, int type) {
+	static bool checked, ok;
+	if (!checked) { checked = true; uint8_t b[4] = {}; ok = Rd(0x00C823B0, b, 4) && b[0] == 0x51 && b[1] == 0x53 && b[2] == 0x8B && b[3] == 0xD9; if (!ok) Log("game: motion type setter is not as expected, body switching disabled"); }
+	return ok && CallMotion((void*)(uintptr_t)co, type);
+}

@@ -14,5 +14,8 @@ void ObserveSetLimits(int maxActors, float simSeconds, float holdSeconds);
 // World collision: sample the ground around each corpse with the game's ray cast and give Delirium that surface. Off by default.
 // Tuning: VelocityScale multiplies the speed inherited from the game's own ragdoll (1 = as the game did it); ShotHealth is how much
 // "health" the dying body is given (lower = collapses faster).
+// KeyframeGameBodies=1 switches the game's own ragdoll bodies to keyframed so they follow the pose we write (loot, bullets and the crosshair then hit the visible body).
+// SkipDismembered=1 leaves actors with cut-off limbs entirely to the game.
+void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered);
 void ObserveSetTuning(float velocityScale, float shotHealth);
 void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell, int half);

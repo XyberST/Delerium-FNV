@@ -19,11 +19,12 @@ static EngineApi* g_api; static NmBuild* g_fit; static Rig g_rig;
 static bool g_enabled, g_drive = true, g_requireDead = true;
 static int g_maxActors = 4; static float g_simSeconds = 8, g_holdSeconds = 300;
 static bool g_worldCollision, g_calibrate; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
-static float g_velScale = 1.0f, g_shotHealth = 1.0f;
+static float g_velScale = 1.0f, g_shotHealth = 1.0f; static bool g_keyframe = true, g_skipDismembered = true;
 static int g_started;                                         // sessions begun this run (verbose logging for the first few only)
 
 void ObserveSetDrive(bool on) { g_drive = on; }
 void ObserveSetRequireDead(bool on) { g_requireDead = on; }
+void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered) { g_keyframe = keyframeGameBodies; g_skipDismembered = skipDismembered; }
 void ObserveSetTuning(float velocityScale, float shotHealth) { g_velScale = std::max(0.0f, std::min(velocityScale, 4.0f)); g_shotHealth = std::max(0.1f, shotHealth); }
 void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell, int half) { g_worldCollision = collision; g_calibrate = calibrate; g_groundFilter = filter; g_groundCell = std::max(0.15f, cell); g_groundHalf = std::max(2, std::min(half, 16)); }
 void ObserveSetLimits(int maxActors, float simSeconds, float holdSeconds) { g_maxActors = std::max(1, std::min(maxActors, 8)); g_simSeconds = simSeconds; g_holdSeconds = holdSeconds; }
@@ -128,6 +129,7 @@ static void Begin(uint32_t actor) {
 	int sim = 0; for (Session* a : g_active) if (a->phase < 3) sim++;
 	if (sim >= g_maxActors) return;                                                        // only bodies still being simulated count against the limit
 	if (g_active.size() >= 24) for (size_t i = 0; i < g_active.size(); i++) if (g_active[i]->phase == 3) { Free(g_active[i]); delete g_active[i]; g_active.erase(g_active.begin() + i); break; }   // drop the oldest held pose
+	if (g_skipDismembered && ActorHasDismemberedLimbs(actor)) { if (g_started < 6) Log("observe: actor %08X has dismembered limbs, left to the game", actor); g_recent[actor] = now; return; }
 	g_recent[actor] = now;
 	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->verbose = s->id <= 4;
 	if (s->verbose) Log("observe[%u]: death burst, actor %08X", s->id, actor);
@@ -160,12 +162,26 @@ static void Begin(uint32_t actor) {
 	g_active.push_back(s);
 }
 
-static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c) {
+// Frame time in game seconds: wall clock until the game's own scaled frame time is readable (VATS, slow motion and "turbo" scale it).
+static float GameDt(float wallDt) { float g = GameFrameSeconds(); return std::min(std::max(g > 0 ? g : wallDt, 0.0005f), 0.05f); }
+
+// The game's own ragdoll bodies would keep simulating (and keep being what the crosshair, bullets and looting see). Switch them to
+// keyframed so they follow the bones we write, as the game does itself when a corpse comes to rest.
+static void KeyframeGameBodies(Session& s) {
+	if (!g_keyframe) return;
+	int n = 0, bad = 0;
+	for (auto& kv : CollectBones(s.root)) {
+		uint32_t node = kv.second, co = 0, vt = 0, target = 0;
+		if (!Rd(node + 0x1C, &co, 4) || !co || !Rd(co, &vt, 4) || vt != 0x10C53DC || !Rd(co + 8, &target, 4) || target != node) continue;   // must be a bhkBlendCollisionObject pointing back at this node
+		if (GameSetMotionType(co, 4)) n++; else bad++;
+	}
+	if (s.verbose) Log("observe[%u]: %d of the game's bodies switched to keyframed%s", s.id, n, bad ? " (some failed)" : "");
+}
+
+static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, float dt) {
 	uint32_t ls = 0xFFFF; Rd(s.actor + 0x108, &ls, 4);                    // Actor::lifeState: 1 dying, 2 dead
 	if (s.verbose) Log("observe[%u]: actor %08X life state %u one frame after the burst", s.id, s.actor, ls);
 	if (g_requireDead && ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: not dying or dead, leaving it to the game", s.id); return false; }
-	LARGE_INTEGER f; QueryPerformanceFrequency(&f);
-	float dt = (float)((double)(c.QuadPart - s.t0.QuadPart) / (double)f.QuadPart); dt = std::min(std::max(dt, 1.0f / 200), 1.0f / 10);
 	float st[21 * 13], zp[21 * 7]; V3 vel[21];
 	for (int i = 0; i < 21; i++) {
 		vel[i] = (p[i] - s.p0[i]) * (g_velScale / dt);
@@ -201,6 +217,7 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c) {
 	float at[3] = { chest.x, chest.y, chest.z }, dir[3] = { hs > 0.05f ? cv.x / hs : 0.0f, hs > 0.05f ? cv.y / hs : 1.0f, 0.0f };
 	g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, g_shotHealth);
 	s.last = c; s.frame = 0; s.phase = 2;
+	KeyframeGameBodies(s);
 	if (s.verbose) Log("observe[%u]: Delirium body started (pelvis %.2f m/s, chest %.2f m/s)", s.id, len(vel[0]), len(vel[10]));
 	return true;
 }
@@ -262,18 +279,20 @@ static bool Step(Session& s) {
 		if (ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: actor is no longer dying or dead (life state %u), session over", s.id, ls); return false; }
 	}
 	if (ActorRoot(s.actor) != s.root) { if (s.verbose) Log("observe[%u]: actor or its 3D is gone, session over", s.id); return false; }
+	if (g_skipDismembered && ActorHasDismemberedLimbs(s.actor)) { if (s.verbose) Log("observe[%u]: a limb was dismembered, handing the corpse back to the game", s.id); return false; }
 	if (!NodesStillValid(s)) { if (s.verbose) Log("observe[%u]: a bone of this actor was replaced or freed (dismemberment or unload), session over", s.id); return false; }
 	if (s.phase == 1) {                                                                      // let the game's own ragdoll run a few frames so its kill impulse shows up as velocity
 		V3 p[21]; Q q[21]; LARGE_INTEGER c; QueryPerformanceCounter(&c);
 		if (s.ground && !s.ground->done()) GroundWork(*s.ground, 120, GroundRayCb, &s);          // the grid is sampled over the warm-up frames to avoid a hitch
 		if (!CapturePose(s, p, q)) return false;
 		if (++s.warm < 4) { memcpy(s.p0, p, sizeof p); memcpy(s.q0, q, sizeof q); s.t0 = c; return true; }
-		return StartAgent(s, p, q, c);
+		LARGE_INTEGER f; QueryPerformanceFrequency(&f); float wall = (float)((double)(c.QuadPart - s.t0.QuadPart) / (double)f.QuadPart);
+		return StartAgent(s, p, q, c, GameDt(wall));
 	}
 	if (s.phase == 2) {
 		LARGE_INTEGER c, f; QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f);
-		float dt = (float)((double)(c.QuadPart - s.last.QuadPart) / (double)f.QuadPart); s.last = c; dt = std::min(std::max(dt, 1.0f / 120), 1.0f / 20);
-		s.frame++;
+		float wall = (float)((double)(c.QuadPart - s.last.QuadPart) / (double)f.QuadPart); s.last = c;
+		s.frame++; float wallMs = wall * 1000, dt = GameDt(wall);       // dt is game seconds: scaled by VATS and slow motion
 		float dev = (s.verbose && (s.frame == 1 || s.frame % 60 == 0)) ? Deviation(s) : 0;
 		g_api->nm_agent_step(s.agent, s.world, dt);
 		if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false;
@@ -282,7 +301,7 @@ static bool Step(Session& s) {
 		for (int i = 0; i < 21; i++) { V3 np{ s.tr[i * 7], s.tr[i * 7 + 1], s.tr[i * 7 + 2] }, op{ s.prev[i * 3], s.prev[i * 3 + 1], s.prev[i * 3 + 2] }; fastest = std::max(fastest, len(np - op) / dt); s.prev[i * 3] = np.x; s.prev[i * 3 + 1] = np.y; s.prev[i * 3 + 2] = np.z; }
 		s.calm = fastest < 0.05f ? s.calm + 1 : 0;
 		if (s.verbose && (s.frame == 1 || s.frame % 60 == 0))
-			Log("observe[%u] f%03u dt=%.1fms pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, dev);
+			Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, dev);
 		if (s.calm >= 45 || s.frame >= (unsigned)(g_simSeconds * 60)) {
 			Free(&s); s.phase = 3; s.hold = 0;
 			if (s.verbose) Log("observe[%u]: body at rest after %u frames, now only holding the final pose", s.id, s.frame);

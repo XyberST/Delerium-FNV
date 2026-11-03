@@ -25,3 +25,6 @@ bool NodeIsPlainNode(uint32_t node);                                  // NiNode 
 bool NodeChildren(uint32_t node, std::vector<uint32_t>& out);
 bool NodeWriteWorld(uint32_t node, const WorldXform& w);
 bool NodeWriteLocal(uint32_t node, const WorldXform& l);
+// True if the game has attached "dismembered limbs" extra data to this actor (ExtraDismemberedLimbs, type 0x5F: presence bit in the
+// extra data list at TESObjectREFR+0x44, bitfield at +8; verified against BaseExtraList::HasType at 0x40FE80).
+bool ActorHasDismemberedLimbs(uint32_t actor);

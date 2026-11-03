@@ -60,3 +60,4 @@ bool NodeChildren(uint32_t node, std::vector<uint32_t>& out) {
 }
 bool NodeWriteWorld(uint32_t node, const WorldXform& w) { return Wr(node + 0x68, w.R, 36) && Wr(node + 0x8C, w.T, 12) && Wr(node + 0x98, &w.S, 4); }
 bool NodeWriteLocal(uint32_t node, const WorldXform& l) { return Wr(node + 0x34, l.R, 36) && Wr(node + 0x58, l.T, 12) && Wr(node + 0x64, &l.S, 4); }
+bool ActorHasDismemberedLimbs(uint32_t actor) { uint8_t b = 0; return Rd(actor + 0x44 + 8 + (0x5F >> 3), &b, 1) && (b & (1 << (0x5F & 7))) != 0; }

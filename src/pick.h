@@ -9,3 +9,9 @@ void PickSetWorld(uint32_t bhkWorld);            // the world the game is curren
 uint32_t PickWorld();
 // from/to in the units the game passes to its own picks. Returns false if the call could not be made.
 bool PickCast(const float from[3], const float to[3], uint32_t filter, bool& hit, float& fraction, float normal[3]);
+
+// ---- other game facts the takeover needs (FalloutNV.exe 1.4.0.525) ----
+// The game's frame time in seconds, scaled by VATS and slow-motion effects the way xNVSE scales its own script timers. 0 if unreadable.
+float GameFrameSeconds();
+// Sets a bhkBlendCollisionObject's motion type (4 = keyframed: the body follows its bone instead of simulating). Same call the game makes itself.
+bool GameSetMotionType(uint32_t collisionObject, int motionType);

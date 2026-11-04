@@ -22,6 +22,35 @@ static bool Call(PickFn fn, void* world, void* blk, bool& hit) { __try { hit = f
 static bool Call(PickFn fn, void* world, void* blk, bool& hit) { hit = fn(world, blk); return true; }
 #endif
 
+// ---- world discovery without hooks: the slot probes never fired (the game calls PickObject directly, and the live world may be a derived class with its own vtable)
+#include <cstdio>
+static bool LooksLikeWorld(uint32_t p) {
+	if (p < 0x10000 || p > 0x7FFF0000 || (p & 3)) return false;
+	uint32_t vt = 0, s = 0;
+	if (!Rd(p, &vt, 4) || vt < 0x1000000 || vt > 0x1300000 || (vt & 3)) return false;
+	if (vt == 0x10C40B4) return true;
+	return Rd(vt + 4 * 50, &s, 4) && s == kPickObject;                                  // a bhkWorld-family vtable: slot 50 is PickObject
+}
+static bool ReadBlock(uint32_t addr, uint32_t* buf, size_t maxDwords, size_t& got) {   // largest readable prefix, in dwords
+	for (size_t n = maxDwords; n >= 8; n /= 2) if (Rd(addr, buf, n * 4)) { got = n; return true; }
+	got = 0; return false;
+}
+static uint32_t g_cacheCell, g_cacheWorld;
+uint32_t PickFindWorld(uint32_t actor, char* how, size_t howLen) {
+	uint32_t cell = 0; if (!Rd(actor + 0x40, &cell, 4) || cell < 0x10000) { snprintf(how, howLen, "actor has no parent cell"); return 0; }
+	if (cell == g_cacheCell && g_cacheWorld && LooksLikeWorld(g_cacheWorld)) { snprintf(how, howLen, "cached, cell %08X", cell); return g_cacheWorld; }
+	static uint32_t l0[128], l1[64]; size_t n0 = 0, n1 = 0;
+	if (!ReadBlock(cell, l0, 128, n0)) { snprintf(how, howLen, "cell %08X unreadable", cell); return 0; }
+	for (size_t i = 0; i < n0; i++) if (l0[i] != cell && LooksLikeWorld(l0[i])) { g_cacheCell = cell; g_cacheWorld = l0[i]; snprintf(how, howLen, "cell %08X +0x%X", cell, (unsigned)(i * 4)); return l0[i]; }
+	unsigned reads = 0;
+	for (size_t i = 0; i < n0; i++) {
+		uint32_t p = l0[i]; if (p < 0x10000 || p > 0x7FFF0000 || (p & 3) || p == cell) continue;
+		if (!ReadBlock(p, l1, 64, n1)) continue; reads++;
+		for (size_t j = 0; j < n1; j++) if (l1[j] != p && LooksLikeWorld(l1[j])) { g_cacheCell = cell; g_cacheWorld = l1[j]; snprintf(how, howLen, "cell %08X +0x%X -> +0x%X", cell, (unsigned)(i * 4), (unsigned)(j * 4)); return l1[j]; }
+	}
+	snprintf(how, howLen, "cell %08X, %u pointers followed, no bhkWorld", cell, reads); return 0;
+}
+
 bool PickCast(const float from[3], const float to[3], uint32_t filter, bool& hit, float& fraction, float normal[3]) {
 	uint32_t world = PickWorld(); if (!world) return false;
 	static uint8_t* blk = (uint8_t*)_aligned_malloc(0x100, 16);

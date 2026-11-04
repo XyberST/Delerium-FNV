@@ -35,12 +35,13 @@ void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 }
 
 // ---- death detection (runs inside the probe thunks: tiny and lock-free) ----
+static volatile LONG g_worldCalls, g_oddVt;
 static volatile LONG g_lastDmgActor, g_lastDmgTick;
 static volatile LONG g_q[16], g_qw, g_qr; static volatile LONG g_lastQ, g_lastQTick;
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	if (!g_enabled) return;
 	DWORD now = GetTickCount();
-	if (role == kRoleWorld || role == kRolePick) { uint32_t vt = 0; if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); return; }   // any call on a bhkWorld tells us the physics world
+	if (role == kRoleWorld || role == kRolePick) { uint32_t vt = 0; InterlockedIncrement(&g_worldCalls); if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); else g_oddVt = (LONG)vt; return; }   // any call on a bhkWorld tells us the physics world
 	if (role == kRoleDamage) { g_lastDmgActor = (LONG)thisPtr; g_lastDmgTick = (LONG)now; }
 	else if (role == kRoleMotionType && stack[1] == 1 /* dynamic */ && now - (DWORD)g_lastDmgTick <= 100) {
 		LONG a = g_lastDmgActor;
@@ -88,10 +89,17 @@ static void Free(Session* s) {
 	s->agent = nullptr; s->world = nullptr;
 }
 static int Depth(uint32_t n) { int d = 0; while (n && d < 64) { n = NodeParent(n); d++; } return d; }
-static float Deviation(const Session& s) {                     // how far the game has moved the bones we wrote
+static float Deviation(const Session& s, uint32_t* worst = nullptr, V3* worstD = nullptr) {   // how far the game has moved the bones we wrote
 	float dev = 0;
-	for (auto& kv : s.wrote) { WorldXform w; if (!NodeWorld(kv.first, w)) continue; V3 d{ w.T[0] - kv.second.x, w.T[1] - kv.second.y, w.T[2] - kv.second.z }; dev = std::max(dev, len(d)); }
+	for (auto& kv : s.wrote) { WorldXform w; if (!NodeWorld(kv.first, w)) continue; V3 d{ w.T[0] - kv.second.x, w.T[1] - kv.second.y, w.T[2] - kv.second.z }; float l = len(d); if (l > dev) { dev = l; if (worst) *worst = kv.first; if (worstD) *worstD = d; } }
 	return dev;
+}
+
+static unsigned g_worldFails; static bool g_calibDone;
+static void EnsureWorld(const Session& s) {   // the physics world of this corpse's own cell, found from the actor (recomputed per kill: cells change)
+	char how[112] = {}; uint32_t w = PickFindWorld(s.actor, how, sizeof how);
+	if (w) { if (w != PickWorld() || s.id <= 3) Log("ray: bhkWorld %08X (%s)", w, how); PickSetWorld(w); }
+	else if (g_worldFails++ < 4) Log("ray: physics world not found (%s); world-slot hook calls %ld, last foreign vtable %08X", how, (long)g_worldCalls, (unsigned)g_oddVt);
 }
 
 // One-off calibration on the first corpse: which ray layers see the floor, and which also see the actor itself?
@@ -155,7 +163,8 @@ static void Begin(uint32_t actor) {
 	  auto add = [&](uint32_t n) { if (seen[n]) return; seen[n] = true; Session::NodeId id{ n, NodeParent(n), 0 }; Rd(n + 8, &id.name, 4); s->ids.push_back(id); };
 	  for (int i = 0; i < 21; i++) { add(s->bone[i]); add(s->boneA[i]); add(s->boneB[i]); } }
 	memcpy(s->p0, p, sizeof p); memcpy(s->q0, q, sizeof q);
-	if (g_calibrate && s->id == 1) CalibrateRays(*s);
+	if (g_calibrate || g_worldCollision) EnsureWorld(*s);
+	if (g_calibrate && !g_calibDone && PickWorld()) { g_calibDone = true; CalibrateRays(*s); }   // retried on every kill until the world is known
 	
 	if (g_worldCollision && PickWorld()) { s->ground = new GroundGrid(); GroundInit(*s->ground, 0, 0, g_groundCell, g_groundHalf, -1.0f, 0.9f); }
 	LARGE_INTEGER c; QueryPerformanceCounter(&c); s->t0 = c; s->last = c; s->phase = 1;
@@ -293,7 +302,7 @@ static bool Step(Session& s) {
 		LARGE_INTEGER c, f; QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f);
 		float wall = (float)((double)(c.QuadPart - s.last.QuadPart) / (double)f.QuadPart); s.last = c;
 		s.frame++; float wallMs = wall * 1000, dt = GameDt(wall);       // dt is game seconds: scaled by VATS and slow motion
-		float dev = (s.verbose && (s.frame == 1 || s.frame % 60 == 0)) ? Deviation(s) : 0;
+		uint32_t worstN = 0; V3 worstD{ 0, 0, 0 }; float dev = (s.verbose && (s.frame == 1 || s.frame % 60 == 0)) ? Deviation(s, &worstN, &worstD) : 0;
 		g_api->nm_agent_step(s.agent, s.world, dt);
 		if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false;
 		if (g_drive) Drive(s, s.tr);
@@ -301,7 +310,8 @@ static bool Step(Session& s) {
 		for (int i = 0; i < 21; i++) { V3 np{ s.tr[i * 7], s.tr[i * 7 + 1], s.tr[i * 7 + 2] }, op{ s.prev[i * 3], s.prev[i * 3 + 1], s.prev[i * 3 + 2] }; fastest = std::max(fastest, len(np - op) / dt); s.prev[i * 3] = np.x; s.prev[i * 3 + 1] = np.y; s.prev[i * 3 + 2] = np.z; }
 		s.calm = fastest < 0.05f ? s.calm + 1 : 0;
 		if (s.verbose && (s.frame == 1 || s.frame % 60 == 0))
-			Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, dev);
+		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, dev);
+		  if (dev > 1.0f) { std::string nm; NodeName(worstN, nm); Log("observe[%u]   worst bone '%s' off by (%.1f %.1f %.1f)", s.id, nm.c_str(), worstD.x, worstD.y, worstD.z); } }
 		if (s.calm >= 45 || s.frame >= (unsigned)(g_simSeconds * 60)) {
 			Free(&s); s.phase = 3; s.hold = 0;
 			if (s.verbose) Log("observe[%u]: body at rest after %u frames, now only holding the final pose", s.id, s.frame);

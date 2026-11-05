@@ -10,7 +10,7 @@ void PickSetWorld(uint32_t bhkWorld);            // the world the game is curren
 uint32_t PickWorld();
 // Finds the bhkWorld of the actor's own cell by walking pointers from TESObjectREFR::parentCell (+0x40), two levels deep. A candidate must have a
 // vtable whose slot 50 is the game's PickObject. Returns 0 if none; 'how' receives where it was found (or why not).
-uint32_t PickFindWorld(uint32_t actor, char* how, size_t howLen);
+uint32_t PickFindWorld(uint32_t actor, uint32_t collisionObject, char* how, size_t howLen);
 // from/to in the units the game passes to its own picks. Returns false if the call could not be made.
 bool PickCast(const float from[3], const float to[3], uint32_t filter, bool& hit, float& fraction, float normal[3]);
 

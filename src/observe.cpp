@@ -36,6 +36,7 @@ void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 
 // ---- death detection (runs inside the probe thunks: tiny and lock-free) ----
 static volatile LONG g_worldCalls, g_oddVt;
+static volatile LONG g_wake[32], g_ww;                      // collision objects the game switched back to a simulated motion type (a grab, an impulse)
 static volatile LONG g_lastDmgActor, g_lastDmgTick;
 static volatile LONG g_q[16], g_qw, g_qr; static volatile LONG g_lastQ, g_lastQTick;
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
@@ -43,6 +44,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	DWORD now = GetTickCount();
 	if (role == kRoleWorld || role == kRolePick) { uint32_t vt = 0; InterlockedIncrement(&g_worldCalls); if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); else g_oddVt = (LONG)vt; return; }   // any call on a bhkWorld tells us the physics world
 	if (role == kRoleDamage) { g_lastDmgActor = (LONG)thisPtr; g_lastDmgTick = (LONG)now; }
+	else if (role == kRoleMotionType && (stack[1] == 1 || stack[1] == 2 || stack[1] == 3 || stack[1] == 6) && now - (DWORD)g_lastDmgTick > 100) { LONG w = InterlockedIncrement(&g_ww) - 1; g_wake[w & 31] = (LONG)thisPtr; }
 	else if (role == kRoleMotionType && stack[1] == 1 /* dynamic */ && now - (DWORD)g_lastDmgTick <= 100) {
 		LONG a = g_lastDmgActor;
 		if (!a || (a == g_lastQ && now - (DWORD)g_lastQTick < 1000)) return;                 // the burst is 36 calls; queue the actor once
@@ -64,6 +66,7 @@ struct Session {
 	unsigned frame = 0, calm = 0, hold = 0, redrives = 0, nWritten = 0, nPropagated = 0, lifeCheck = 0;
 	float tr[21 * 7]{}, prev[21 * 3]{};
 	std::map<uint32_t, V3> wrote;                               // game-world bone translation we last wrote
+	std::vector<uint32_t> cos; LONG wakeSeen = 0;                // the game's collision objects we keyframed; wake calls already looked at
 };
 static std::vector<Session*> g_active; static std::map<uint32_t, DWORD> g_recent;
 
@@ -97,7 +100,9 @@ static float Deviation(const Session& s, uint32_t* worst = nullptr, V3* worstD =
 
 static unsigned g_worldFails; static bool g_calibDone;
 static void EnsureWorld(const Session& s) {   // the physics world of this corpse's own cell, found from the actor (recomputed per kill: cells change)
-	char how[112] = {}; uint32_t w = PickFindWorld(s.actor, how, sizeof how);
+	uint32_t co0 = 0;
+	for (auto& kv : CollectBones(s.root)) { uint32_t co = 0, vt = 0; if (Rd(kv.second + 0x1C, &co, 4) && co && Rd(co, &vt, 4) && vt == 0x10C53DC) { co0 = co; break; } }
+	char how[200] = {}; uint32_t w = PickFindWorld(s.actor, co0, how, sizeof how);
 	if (w) { if (w != PickWorld() || s.id <= 3) Log("ray: bhkWorld %08X (%s)", w, how); PickSetWorld(w); }
 	else if (g_worldFails++ < 4) Log("ray: physics world not found (%s); world-slot hook calls %ld, last foreign vtable %08X", how, (long)g_worldCalls, (unsigned)g_oddVt);
 }
@@ -182,8 +187,9 @@ static void KeyframeGameBodies(Session& s) {
 	for (auto& kv : CollectBones(s.root)) {
 		uint32_t node = kv.second, co = 0, vt = 0, target = 0;
 		if (!Rd(node + 0x1C, &co, 4) || !co || !Rd(co, &vt, 4) || vt != 0x10C53DC || !Rd(co + 8, &target, 4) || target != node) continue;   // must be a bhkBlendCollisionObject pointing back at this node
-		if (GameSetMotionType(co, 4)) n++; else bad++;
+		if (GameSetMotionType(co, 4)) { n++; s.cos.push_back(co); } else bad++;
 	}
+	s.wakeSeen = g_ww;
 	if (s.verbose) Log("observe[%u]: %d of the game's bodies switched to keyframed%s", s.id, n, bad ? " (some failed)" : "");
 }
 
@@ -289,6 +295,10 @@ static bool Step(Session& s) {
 	}
 	if (ActorRoot(s.actor) != s.root) { if (s.verbose) Log("observe[%u]: actor or its 3D is gone, session over", s.id); return false; }
 	if (g_skipDismembered && ActorHasDismemberedLimbs(s.actor)) { if (s.verbose) Log("observe[%u]: a limb was dismembered, handing the corpse back to the game", s.id); return false; }
+	if (s.frame > 5 && !s.cos.empty()) {                                                      // the game woke one of the bodies we keyframed (grabbing, an impulse): give the corpse back
+		LONG w = g_ww; if (w - s.wakeSeen > 32) s.wakeSeen = w - 32;
+		for (; s.wakeSeen < w; s.wakeSeen++) { uint32_t co = (uint32_t)g_wake[s.wakeSeen & 31]; for (uint32_t k : s.cos) if (k == co) { Log("observe[%u]: the game switched body %08X to a simulated motion type (grab or impulse), handing the corpse back", s.id, co); return false; } }
+	}
 	if (!NodesStillValid(s)) { if (s.verbose) Log("observe[%u]: a bone of this actor was replaced or freed (dismemberment or unload), session over", s.id); return false; }
 	if (s.phase == 1) {                                                                      // let the game's own ragdoll run a few frames so its kill impulse shows up as velocity
 		V3 p[21]; Q q[21]; LARGE_INTEGER c; QueryPerformanceCounter(&c);

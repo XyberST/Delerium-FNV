@@ -158,6 +158,12 @@ static bool GroundRayCb(void* ctx, float x, float y, float& z) {
 	z = (top - (top - bottom) * fr - s.rootW.T[2]) / toUnits; s.groundHits++; return true;
 }
 
+static int HiddenLimb(const Session& s) {                        // index of a rig part whose bone is scaled to (almost) nothing, or -1
+	const float base = s.rootW.S != 0 ? s.rootW.S : 1.0f;
+	for (int i = 0; i < 21; i++) { WorldXform w; if (NodeWorld(s.bone[i], w) && w.S < 0.2f * base) return i; }
+	return -1;
+}
+
 static void Begin(uint32_t actor) {
 	DWORD now = GetTickCount();
 	for (Session* a : g_active) if (a->actor == actor) return;
@@ -165,7 +171,6 @@ static void Begin(uint32_t actor) {
 	int sim = 0; for (Session* a : g_active) if (a->phase < 3) sim++;
 	if (sim >= g_maxActors) return;                                                        // only bodies still being simulated count against the limit
 	if (g_active.size() >= 24) for (size_t i = 0; i < g_active.size(); i++) if (g_active[i]->phase == 3) { Free(g_active[i]); delete g_active[i]; g_active.erase(g_active.begin() + i); break; }   // drop the oldest held pose
-	if (g_skipDismembered && ActorHasDismemberedLimbs(actor)) { if (g_started < 12) { char hex[100] = {}; ActorDismemberDump(actor, hex, sizeof hex); Log("observe: actor %08X has dismembered limbs, left to the game (extra: %s)", actor, hex); } g_recent[actor] = now; return; }
 	g_recent[actor] = now;
 	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->verbose = s->id <= 4;
 	if (s->verbose) Log("observe[%u]: death burst, actor %08X", s->id, actor);
@@ -177,6 +182,10 @@ static void Begin(uint32_t actor) {
 	for (int i = 0; i < 21; i++) {
 		s->bone[i] = find(g_rig.part[i].ref); s->boneA[i] = find(g_rig.part[i].jointA); s->boneB[i] = find(g_rig.part[i].jointB);
 		if (!s->bone[i] || !s->boneA[i] || !s->boneB[i]) { Log("observe[%u]: bone '%s' not found on this actor (not a humanoid?), skipping", s->id, g_rig.part[i].ref.c_str()); delete s; return; }
+	}
+	if (g_skipDismembered) {                                                                // a cut-off limb is hidden by scaling its bone to nothing; only those actors are left to the game
+		int hid = HiddenLimb(*s);
+		if (hid >= 0) { Log("observe: actor %08X has a cut-off limb ('%s' scaled away), left to the game", actor, g_rig.part[hid].ref.c_str()); delete s; return; }
 	}
 	for (int i = 0; i < 21; i++) {
 		if (!g_rig.part[i].write) continue;
@@ -318,7 +327,7 @@ static bool Step(Session& s) {
 		if (ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: actor is no longer dying or dead (life state %u), session over", s.id, ls); return false; }
 	}
 	if (ActorRoot(s.actor) != s.root) { if (s.verbose) Log("observe[%u]: actor or its 3D is gone, session over", s.id); return false; }
-	if (g_skipDismembered && ActorHasDismemberedLimbs(s.actor)) { if (s.verbose) Log("observe[%u]: a limb was dismembered, handing the corpse back to the game", s.id); return false; }
+	if (g_skipDismembered && (s.frame & 3) == 0) { int hid = HiddenLimb(s); if (hid >= 0) { Log("observe[%u]: a limb was cut off ('%s' scaled away), handing the corpse back to the game", s.id, g_rig.part[hid].ref.c_str()); return false; } }
 	if (s.frame > 5 && !s.cos.empty()) {                                                      // the game woke one of the bodies we keyframed (grabbing, an impulse): give the corpse back
 		LONG w = g_ww; if (w - s.wakeSeen > 32) s.wakeSeen = w - 32;
 		for (; s.wakeSeen < w; s.wakeSeen++) { uint32_t co = (uint32_t)g_wake[s.wakeSeen & 31]; for (uint32_t k : s.cos) if (k == co) { Log("observe[%u]: the game switched body %08X to a simulated motion type (grab or impulse), handing the corpse back", s.id, co); return false; } }

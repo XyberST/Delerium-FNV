@@ -244,6 +244,33 @@ static void KeyframeGameBodies(Session& s) {
 	if (s.verbose) Log("observe[%u]: %d of the game's bodies switched to keyframed%s", s.id, n, bad ? " (some failed)" : "");
 }
 
+// ---- discovery only: how does the game store a rigid body's position and velocity? Samples three game bodies on consecutive warm-up frames, while the game's own
+// ragdoll is still moving them, and logs which dwords change, next to the speed measured from the bones. Read-only.
+static bool g_probe = true;
+static void ProbeBodies(Session& s, const V3* p, LARGE_INTEGER c) {
+	if (!g_probe || s.id > 2) return;
+	static const char* names[3] = { "Bip01 Pelvis", "Bip01 Spine1", "Bip01 Head" };
+	static uint32_t snap[3][128]; static uint32_t addr[3]; static int sid = 0;
+	auto bones = CollectBones(s.root); LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+	const float wall = s.warm ? (float)((double)(c.QuadPart - s.t0.QuadPart) / (double)f.QuadPart) : 0;
+	if (s.warm >= 1 && wall > 0) Log("probe[%u] frame %u: pelvis bone speed (%.2f %.2f %.2f) m/s over %.1f ms", s.id, s.warm, (p[0].x - s.p0[0].x) / wall, (p[0].y - s.p0[0].y) / wall, (p[0].z - s.p0[0].z) / wall, wall * 1000);
+	for (int k = 0; k < 3; k++) {
+		auto it = bones.find(names[k]); if (it == bones.end()) continue;
+		uint32_t co = 0, body = 0, hkb = 0; if (!Rd(it->second + 0x1C, &co, 4) || !co || !Rd(co + 0x10, &body, 4) || !body || !Rd(body + 8, &hkb, 4) || !hkb) continue;
+		uint32_t now[128]; if (!Rd(hkb, now, sizeof now)) continue;
+		if (sid == s.id && addr[k] == hkb && s.warm >= 2) {
+			int logged = 0;
+			for (int i = 0; i < 128 && logged < 36; i++) if (now[i] != snap[k][i]) {
+				float a, b; memcpy(&a, &snap[k][i], 4); memcpy(&b, &now[i], 4); bool fa = std::fabs(a) < 1e5f && std::fabs(b) < 1e5f && (std::fabs(a) > 1e-6f || std::fabs(b) > 1e-6f);
+				if (fa) Log("probe[%u] %s hkp %08X +0x%03X: %.4f -> %.4f", s.id, names[k], hkb, i * 4, a, b); else Log("probe[%u] %s hkp %08X +0x%03X: %08X -> %08X", s.id, names[k], hkb, i * 4, snap[k][i], now[i]);
+				logged++;
+			}
+		}
+		memcpy(snap[k], now, sizeof now); addr[k] = hkb;
+	}
+	sid = s.id;
+}
+
 static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, float dt) {
 	uint32_t ls = 0xFFFF; Rd(s.actor + 0x108, &ls, 4);                    // Actor::lifeState: 1 dying, 2 dead
 	if (s.verbose) Log("observe[%u]: actor %08X life state %u one frame after the burst", s.id, s.actor, ls);
@@ -355,6 +382,7 @@ static bool Step(Session& s) {
 		V3 p[21]; Q q[21]; LARGE_INTEGER c; QueryPerformanceCounter(&c);
 		if (s.ground && !s.ground->done()) GroundWork(*s.ground, 120, GroundRayCb, &s);          // the grid is sampled over the warm-up frames to avoid a hitch
 		if (!CapturePose(s, p, q)) return false;
+		ProbeBodies(s, p, c);
 		if (++s.warm < 4) { memcpy(s.p0, p, sizeof p); memcpy(s.q0, q, sizeof q); s.t0 = c; return true; }
 		LARGE_INTEGER f; QueryPerformanceFrequency(&f); float wall = (float)((double)(c.QuadPart - s.t0.QuadPart) / (double)f.QuadPart);
 		return StartAgent(s, p, q, c, GameDt(wall));

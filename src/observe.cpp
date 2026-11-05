@@ -19,13 +19,13 @@ static const float kUnit = 0.0142875f;                        // metres per game
 static EngineApi* g_api; static NmBuild* g_fit; static Rig g_rig;
 static bool g_enabled, g_drive = true, g_requireDead = true;
 static int g_maxActors = 4; static float g_simSeconds = 8, g_holdSeconds = 300;
-static bool g_worldCollision, g_calibrate, g_groundAuto, g_groundReady = true, g_release = true; static unsigned g_calibTries; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
+static bool g_worldCollision, g_calibrate, g_groundAuto, g_groundReady = true, g_release = true; static unsigned g_calibTries; static float g_restSpeed = 1.5f; static unsigned g_restFrames = 30; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
 static float g_velScale = 1.0f, g_shotHealth = 1.0f; static bool g_keyframe = true, g_skipDismembered = true;
 static int g_started;                                         // sessions begun this run (verbose logging for the first few only)
 
 void ObserveSetDrive(bool on) { g_drive = on; }
 void ObserveSetRequireDead(bool on) { g_requireDead = on; }
-void ObserveSetRelease(bool on) { g_release = on; }
+void ObserveSetRelease(bool on, float restSpeed, unsigned restFrames) { g_release = on; g_restSpeed = restSpeed; g_restFrames = restFrames; }
 void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered) { g_keyframe = keyframeGameBodies; g_skipDismembered = skipDismembered; }
 void ObserveSetTuning(float velocityScale, float shotHealth) { g_velScale = std::max(0.0f, std::min(velocityScale, 4.0f)); g_shotHealth = std::max(0.1f, shotHealth); }
 void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell, int half) { g_worldCollision = collision; g_calibrate = calibrate; g_groundAuto = filter == 0; g_groundReady = filter != 0; g_groundFilter = filter ? filter : 0x011F0025; g_groundCell = std::max(0.15f, cell); g_groundHalf = std::max(2, std::min(half, 16)); }
@@ -127,14 +127,32 @@ static int RunLayers(const Session& s, const char* tag, LayerRes* res) {
 	}
 	return floorHits;
 }
+// A quick yes/no: does a straight-down ray through the feet hit something near the floor on any of a few common layers, with the current world and scale?
+static bool FloorWorks(const Session& s) {
+	static const uint32_t L[] = { 0x01, 0x25, 0x0D, 0x11, 0x03, 0x02, 0x08, 0x0A };
+	const float* r = s.rootW.T; const float d0[3] = { r[0], r[1], r[2] + 60 }, d1[3] = { r[0], r[1], r[2] - 60 };
+	for (uint32_t l : L) { bool h = false; float f = 1, n[3] = {}; if (PickCast(d0, d1, 0x011F0000u | l, h, f, n) && h && f < 1.0f && std::fabs(r[2] + 60 - 120 * f - r[2]) <= 40.0f) return true; }
+	return false;
+}
+static bool FindWorkingWorld(const Session& s) {
+	const uint32_t orig = PickWorld(); const float scales[2] = { kUnit, 1.0f };
+	for (float k : scales) { PickSetScale(k); if (FloorWorks(s)) return true; }
+	uint32_t cand[40]; int n = PickCandidates(cand, 40); char d[160];
+	for (int i = 0; i < n && i < 4; i++) { PickDescribe(cand[i], d, sizeof d); Log("ray: candidate %s", d); }
+	for (int i = 0; i < n; i++) for (float k : scales) {
+		PickSetWorld(cand[i]); PickSetScale(k);
+		if (FloorWorks(s)) { PickDescribe(cand[i], d, sizeof d); Log("ray: %s is the world that answers (%s)", d, k == 1.0f ? "raw units" : "metres"); PickForceWorld(cand[i]); return true; }
+	}
+	PickSetWorld(orig); PickSetScale(kUnit); Log("ray: %d objects around the found world tried, none answered a ray", n); return false;
+}
 static bool CalibrateRays(const Session& s) {
 	if (!PickWorld()) { Log("ray: no physics world known yet, calibration skipped"); return false; }
 	WorldXform pel; if (!NodeWorld(s.bone[0], pel)) return false;
 	const float* r = s.rootW.T; Log("ray: bhkWorld %08X, root (%.1f %.1f %.1f), pelvis (%.1f %.1f %.1f)", PickWorld(), r[0], r[1], r[2], pel.T[0], pel.T[1], pel.T[2]);
 	static LayerRes res[64]; for (auto& x : res) x = LayerRes();
-	PickSetScale(kUnit); int fh = RunLayers(s, "metres", res);
-	if (!fh) { PickSetScale(1.0f); fh = RunLayers(s, "raw units", res); if (!fh) { PickSetScale(kUnit); Log("ray: no layer sees the floor with either scale"); return false; } Log("ray: the game's ray cast takes raw game units"); }
-	else Log("ray: the game's ray cast takes Havok metres");
+	if (!FindWorkingWorld(s)) return false;
+	int fh = RunLayers(s, std::fabs(PickScale() - 1.0f) < 1e-6f ? "raw units" : "metres", res); (void)fh;
+	Log("ray: world %08X, ray ends in %s", PickWorld(), std::fabs(PickScale() - 1.0f) < 1e-6f ? "raw game units" : "Havok metres");
 	if (g_groundAuto) {                                                                      // prefer a layer that finds the floor under the feet but not the corpse itself
 		int pick = -1;
 		for (int pass = 0; pass < 2 && pick < 0; pass++)
@@ -351,11 +369,11 @@ static bool Step(Session& s) {
 		if (g_drive) Drive(s, s.tr);
 		float fastest = 0;
 		for (int i = 0; i < 21; i++) { V3 np{ s.tr[i * 7], s.tr[i * 7 + 1], s.tr[i * 7 + 2] }, op{ s.prev[i * 3], s.prev[i * 3 + 1], s.prev[i * 3 + 2] }; fastest = std::max(fastest, len(np - op) / dt); s.prev[i * 3] = np.x; s.prev[i * 3 + 1] = np.y; s.prev[i * 3 + 2] = np.z; }
-		s.calm = fastest < 0.05f ? s.calm + 1 : 0;
+		s.calm = (s.frame >= 90 && fastest < g_restSpeed) ? s.calm + 1 : 0;
 		if (s.verbose && (s.frame == 1 || s.frame % 60 == 0))
 		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, dev);
 		  if (dev > 1.0f) { std::string nm; NodeName(worstN, nm); Log("observe[%u]   worst bone '%s' off by (%.1f %.1f %.1f)", s.id, nm.c_str(), worstD.x, worstD.y, worstD.z); } }
-		if (s.calm >= 45 || s.frame >= (unsigned)(g_simSeconds * 60)) {
+		if (s.calm >= g_restFrames || s.frame >= (unsigned)(g_simSeconds * 60)) {
 			Free(&s);
 			if (g_release && !s.cos.empty()) {                                    // hand the resting corpse to the game: its bodies become simulated again, so it can be grabbed and dragged like a vanilla one
 				int n = 0; g_ours = 1; for (uint32_t co : s.cos) if (GameSetMotionType(co, 1)) n++; g_ours = 0;

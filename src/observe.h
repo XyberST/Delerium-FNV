@@ -18,6 +18,6 @@ void ObserveSetLimits(int maxActors, float simSeconds, float holdSeconds);
 // SkipDismembered=1 leaves actors with cut-off limbs entirely to the game.
 void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered);
 // ReleaseAtRest=1: when the Delirium body comes to rest, the game's bodies are switched back to simulated so the corpse can be grabbed like a vanilla one.
-void ObserveSetRelease(bool on);
+void ObserveSetRelease(bool on, float restSpeed, unsigned restFrames);   // a corpse counts as at rest after restFrames frames with every part slower than restSpeed (m/s)
 void ObserveSetTuning(float velocityScale, float shotHealth);
 void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell, int half);

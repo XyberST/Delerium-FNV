@@ -50,7 +50,7 @@ __declspec(dllexport) bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInf
 __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	PickLogDir();
 	LogOpen((g_logDir + "\\DeliriumFNV.log").c_str());
-	Log("DeliriumFNV 0.8.1 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
+	Log("DeliriumFNV 0.9 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
 	IngameInit(const_cast<NVSEInterface*>(nvse));
 	std::string ini = g_pluginDir + "\\DeliriumFNV.ini";
 	if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) ini = g_root + "\\DeliriumFNV.ini";   // also accept the ini beside the dll
@@ -66,7 +66,7 @@ __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	char b[32]; GetPrivateProfileStringA("General", "SimSeconds", "8", b, sizeof b, ini.c_str()); float sim = (float)atof(b);
 	GetPrivateProfileStringA("General", "HoldSeconds", "300", b, sizeof b, ini.c_str());
 	ObserveSetLimits(GetPrivateProfileIntA("General", "MaxActors", 4, ini.c_str()), sim, (float)atof(b));
-	ObserveSetRelease(GetPrivateProfileIntA("General", "ReleaseAtRest", 1, ini.c_str()) != 0);
+	{ char rs[32]; GetPrivateProfileStringA("General", "RestSpeed", "1.5", rs, sizeof rs, ini.c_str()); ObserveSetRelease(GetPrivateProfileIntA("General", "ReleaseAtRest", 1, ini.c_str()) != 0, (float)atof(rs), (unsigned)GetPrivateProfileIntA("General", "RestFrames", 30, ini.c_str())); }
 	ObserveSetBodies(GetPrivateProfileIntA("General", "KeyframeGameBodies", 1, ini.c_str()) != 0, GetPrivateProfileIntA("General", "SkipDismembered", 1, ini.c_str()) != 0);
 	{ char v[32], hp[32]; GetPrivateProfileStringA("General", "VelocityScale", "1.0", v, sizeof v, ini.c_str()); GetPrivateProfileStringA("General", "ShotHealth", "1.0", hp, sizeof hp, ini.c_str()); ObserveSetTuning((float)atof(v), (float)atof(hp)); }
 	{ char f[32]; GetPrivateProfileStringA("World", "GroundFilter", "auto", f, sizeof f, ini.c_str()); char c[32]; GetPrivateProfileStringA("World", "GroundCell", "0.35", c, sizeof c, ini.c_str());

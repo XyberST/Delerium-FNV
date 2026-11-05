@@ -35,7 +35,7 @@ static bool ReadBlock(uint32_t addr, uint32_t* buf, size_t maxDwords, size_t& go
 	for (size_t n = maxDwords; n >= 8; n /= 2) if (Rd(addr, buf, n * 4)) { got = n; return true; }
 	got = 0; return false;
 }
-static uint32_t g_cacheCell, g_cacheWorld, g_cacheHkw;
+static uint32_t g_cacheCell, g_cacheWorld, g_cacheHkw, g_lastParent, g_forced, g_forcedHkw;
 // A bhkWorld keeps its hkpWorld at +8 (bhkRefObject). We know the hkpWorld from the actor's own body (collision object +0x10 -> body, +8 -> hkp body, +8 -> hkpWorld),
 // so any object whose +8 is that hkpWorld and whose first dword is a code-section vtable is the bhkWorld. Checked in memory while walking the cell, no per-candidate reads.
 static bool IsRdata(uint32_t v) { return v >= 0x1000000 && v < 0x1300000 && !(v & 3); }
@@ -43,21 +43,22 @@ uint32_t PickFindWorld(uint32_t actor, uint32_t co, char* how, size_t howLen) {
 	uint32_t cell = 0; if (!Rd(actor + 0x40, &cell, 4) || cell < 0x10000) { snprintf(how, howLen, "actor has no parent cell"); return 0; }
 	uint32_t body = 0, hkb = 0, hkw = 0;
 	if (co) { Rd(co + 0x10, &body, 4); if (body) Rd(body + 8, &hkb, 4); if (hkb) Rd(hkb + 8, &hkw, 4); }
+	if (g_forced && (!hkw || hkw == g_forcedHkw)) { snprintf(how, howLen, "world proven by a real hit"); return g_forced; }
 	if (hkw && hkw == g_cacheHkw && g_cacheWorld) { uint32_t b = 0; if (Rd(g_cacheWorld + 8, &b, 4) && b == hkw) { snprintf(how, howLen, "cached by hkpWorld %08X", hkw); return g_cacheWorld; } }   // one hkpWorld serves many cells
 	if (!hkw && cell == g_cacheCell && g_cacheWorld && LooksLikeWorld(g_cacheWorld)) { snprintf(how, howLen, "cached, cell %08X", cell); return g_cacheWorld; }
 	static uint32_t l0[128], l1[64], l2[4]; size_t n0 = 0, n1 = 0;
 	if (!ReadBlock(cell, l0, 128, n0)) { snprintf(how, howLen, "cell %08X unreadable", cell); return 0; }
-	auto accept = [&](uint32_t w, const char* by, unsigned a, unsigned b2) { g_cacheCell = cell; g_cacheWorld = w; g_cacheHkw = hkw; snprintf(how, howLen, "%s cell %08X +0x%X +0x%X", by, cell, a, b2); return w; };
-	for (size_t i = 0; i < n0; i++) if (l0[i] != cell && LooksLikeWorld(l0[i])) return accept(l0[i], "vtable", (unsigned)(i * 4), 0);
+	auto accept = [&](uint32_t w, const char* by, unsigned a, unsigned b2, uint32_t parent) { g_lastParent = parent; g_cacheCell = cell; g_cacheWorld = w; g_cacheHkw = hkw; snprintf(how, howLen, "%s cell %08X +0x%X +0x%X", by, cell, a, b2); return w; };
+	for (size_t i = 0; i < n0; i++) if (l0[i] != cell && LooksLikeWorld(l0[i])) return accept(l0[i], "vtable", (unsigned)(i * 4), 0, cell);
 	unsigned reads = 0, reads2 = 0;
 	for (size_t i = 0; i < n0; i++) {
 		uint32_t p = l0[i]; if (p < 0x10000 || p > 0x7FFF0000 || (p & 3) || p == cell) continue;
-		if (hkw && Rd(p, l2, 12) && IsRdata(l2[0]) && l2[2] == hkw) return accept(p, "hkp", (unsigned)(i * 4), 0);
+		if (hkw && Rd(p, l2, 12) && IsRdata(l2[0]) && l2[2] == hkw) return accept(p, "hkp", (unsigned)(i * 4), 0, cell);
 		if (!ReadBlock(p, l1, 64, n1)) continue; reads++;
 		for (size_t j = 0; j < n1; j++) {
 			uint32_t q = l1[j]; if (q == p || q < 0x10000 || q > 0x7FFF0000 || (q & 3)) continue;
-			if (LooksLikeWorld(q)) return accept(q, "vtable", (unsigned)(i * 4), (unsigned)(j * 4));
-			if (hkw && Rd(q, l2, 12)) { reads2++; if (IsRdata(l2[0]) && l2[2] == hkw) return accept(q, "hkp", (unsigned)(i * 4), (unsigned)(j * 4)); }
+			if (LooksLikeWorld(q)) return accept(q, "vtable", (unsigned)(i * 4), (unsigned)(j * 4), p);
+			if (hkw && Rd(q, l2, 12)) { reads2++; if (IsRdata(l2[0]) && l2[2] == hkw) return accept(q, "hkp", (unsigned)(i * 4), (unsigned)(j * 4), p); }
 		}
 	}
 	snprintf(how, howLen, "cell %08X, %u+%u pointers followed; co %08X body %08X hkpBody %08X hkpWorld %08X", cell, reads, reads2, co, body, hkb, hkw); return 0;
@@ -65,6 +66,7 @@ uint32_t PickFindWorld(uint32_t actor, uint32_t co, char* how, size_t howLen) {
 
 static float g_pickScale = 0.0142875f;
 void PickSetScale(float s) { g_pickScale = s; }
+float PickScale() { return g_pickScale; }
 bool PickCast(const float from[3], const float to[3], uint32_t filter, bool& hit, float& fraction, float normal[3]) {
 	uint32_t world = PickWorld(); if (!world) return false;
 	static uint8_t* blk = (uint8_t*)_aligned_malloc(0x100, 16);
@@ -106,3 +108,17 @@ bool GameSetMotionType(uint32_t co, int type) {
 	if (!checked) { checked = true; uint8_t b[4] = {}; ok = Rd(0x00C823B0, b, 4) && b[0] == 0x51 && b[1] == 0x53 && b[2] == 0x8B && b[3] == 0xD9; if (!ok) Log("game: motion type setter is not as expected, body switching disabled"); }
 	return ok && CallMotion((void*)(uintptr_t)co, type);
 }
+
+int PickCandidates(uint32_t* out, int max) {
+	int n = 0;
+	auto add = [&](uint32_t c) { if (c < 0x10000 || c > 0x7FFF0000 || (c & 3) || n >= max) return; uint32_t vt = 0; if (!Rd(c, &vt, 4) || !IsRdata(vt)) return; for (int i = 0; i < n; i++) if (out[i] == c) return; out[n++] = c; };
+	add(g_cacheWorld); add(g_lastParent);
+	static uint32_t blk[64]; size_t got = 0; const uint32_t bases[2] = { g_cacheWorld, g_lastParent };
+	for (uint32_t b : bases) if (b && ReadBlock(b, blk, 64, got)) for (size_t i = 0; i < got; i++) add(blk[i]);
+	return n;
+}
+void PickDescribe(uint32_t o, char* out, size_t n) {
+	uint32_t vt = 0, s = 0, f8 = 0; Rd(o, &vt, 4); if (IsRdata(vt)) Rd(vt + 4 * 50, &s, 4); Rd(o + 8, &f8, 4);
+	snprintf(out, n, "%08X: vt %08X slot50 %08X +8 %08X", o, vt, s, f8);
+}
+void PickForceWorld(uint32_t w) { g_forced = w; g_forcedHkw = g_cacheHkw; g_world = (LONG)w; }

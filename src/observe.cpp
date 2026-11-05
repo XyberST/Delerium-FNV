@@ -135,15 +135,15 @@ static bool FloorWorks(const Session& s) {
 	return false;
 }
 static bool FindWorkingWorld(const Session& s) {
-	const uint32_t orig = PickWorld(); const float scales[2] = { kUnit, 1.0f };
+	const uint32_t orig = PickWorld(); const float scales[3] = { 1.0f / 7.0f, kUnit, 1.0f };   // FNV's Havok scale is 7 game units per Havok unit (the game's bodies sit at game units / 7)
 	for (float k : scales) { PickSetScale(k); if (FloorWorks(s)) return true; }
 	uint32_t cand[40]; int n = PickCandidates(cand, 40); char d[160];
 	for (int i = 0; i < n && i < 4; i++) { PickDescribe(cand[i], d, sizeof d); Log("ray: candidate %s", d); }
 	for (int i = 0; i < n; i++) for (float k : scales) {
 		PickSetWorld(cand[i]); PickSetScale(k);
-		if (FloorWorks(s)) { PickDescribe(cand[i], d, sizeof d); Log("ray: %s is the world that answers (%s)", d, k == 1.0f ? "raw units" : "metres"); PickForceWorld(cand[i]); return true; }
+		if (FloorWorks(s)) { PickDescribe(cand[i], d, sizeof d); Log("ray: %s is the world that answers (%s)", d, k == 1.0f ? "raw units" : (k < 0.05f ? "game/70" : "game/7")); PickForceWorld(cand[i]); return true; }
 	}
-	PickSetWorld(orig); PickSetScale(kUnit); Log("ray: %d objects around the found world tried, none answered a ray", n); return false;
+	PickSetWorld(orig); PickSetScale(1.0f / 7.0f); Log("ray: %d objects around the found world tried, none answered a ray", n); return false;
 }
 static bool CalibrateRays(const Session& s) {
 	if (!PickWorld()) { Log("ray: no physics world known yet, calibration skipped"); return false; }
@@ -151,8 +151,8 @@ static bool CalibrateRays(const Session& s) {
 	const float* r = s.rootW.T; Log("ray: bhkWorld %08X, root (%.1f %.1f %.1f), pelvis (%.1f %.1f %.1f)", PickWorld(), r[0], r[1], r[2], pel.T[0], pel.T[1], pel.T[2]);
 	static LayerRes res[64]; for (auto& x : res) x = LayerRes();
 	if (!FindWorkingWorld(s)) return false;
-	int fh = RunLayers(s, std::fabs(PickScale() - 1.0f) < 1e-6f ? "raw units" : "metres", res); (void)fh;
-	Log("ray: world %08X, ray ends in %s", PickWorld(), std::fabs(PickScale() - 1.0f) < 1e-6f ? "raw game units" : "Havok metres");
+	int fh = RunLayers(s, std::fabs(PickScale() - 1.0f) < 1e-6f ? "raw units" : (PickScale() < 0.05f ? "game/70" : "game/7"), res); (void)fh;
+	Log("ray: world %08X, ray ends in %s", PickWorld(), std::fabs(PickScale() - 1.0f) < 1e-6f ? "raw game units" : (PickScale() < 0.05f ? "game units / 70" : "Havok units (game units / 7)"));
 	if (g_groundAuto) {                                                                      // prefer a layer that finds the floor under the feet but not the corpse itself
 		int pick = -1;
 		for (int pass = 0; pass < 2 && pick < 0; pass++)
@@ -378,6 +378,17 @@ static bool Step(Session& s) {
 		for (; s.wakeSeen < w; s.wakeSeen++) { uint32_t co = (uint32_t)g_wake[s.wakeSeen & 31]; for (uint32_t k : s.cos) if (k == co) { Log("observe[%u]: the game switched body %08X to a simulated motion type (grab or impulse), handing the corpse back", s.id, co); return false; } }
 	}
 	if (!NodesStillValid(s)) { if (s.verbose) Log("observe[%u]: a bone of this actor was replaced or freed (dismemberment or unload), session over", s.id); return false; }
+	if (s.phase == 4) {                                                                      // discovery: raw velocity area of a simulated game body
+		s.frame++;
+		if (s.frame == 2 || s.frame == 6 || s.frame == 12 || s.frame == 24) {
+			auto bones = CollectBones(s.root); auto it = bones.find("Bip01 Pelvis"); uint32_t co = 0, body = 0, hkb = 0;
+			if (it != bones.end() && Rd(it->second + 0x1C, &co, 4) && co && Rd(co + 0x10, &body, 4) && body && Rd(body + 8, &hkb, 4) && hkb) {
+				float f[48]; if (Rd(hkb + 0x190, f, sizeof f)) { char line[600]; size_t k = 0; for (int i = 0; i < 48 && k + 12 < sizeof line; i++) k += snprintf(line + k, sizeof line - k, "%s%.3f", (i % 4 == 0) ? (i ? " | " : "") : " ", f[i]); Log("probe[%u] after release f%u pelvis hkp %08X +0x190..+0x24F: %s", s.id, s.frame, hkb, line); }
+				uint32_t t = 0; Rd(hkb + 0xE8, &t, 4); Log("probe[%u] after release f%u pelvis motion header +0xE8: %08X", s.id, s.frame, t);
+			}
+		}
+		return s.frame < 26;
+	}
 	if (s.phase == 1) {                                                                      // let the game's own ragdoll run a few frames so its kill impulse shows up as velocity
 		V3 p[21]; Q q[21]; LARGE_INTEGER c; QueryPerformanceCounter(&c);
 		if (s.ground && !s.ground->done()) GroundWork(*s.ground, 120, GroundRayCb, &s);          // the grid is sampled over the warm-up frames to avoid a hitch
@@ -403,9 +414,11 @@ static bool Step(Session& s) {
 		  if (dev > 1.0f) { std::string nm; NodeName(worstN, nm); Log("observe[%u]   worst bone '%s' off by (%.1f %.1f %.1f)", s.id, nm.c_str(), worstD.x, worstD.y, worstD.z); } }
 		if (s.calm >= g_restFrames || s.frame >= (unsigned)(g_simSeconds * 60)) {
 			Free(&s);
-			if (g_release && !s.cos.empty()) {                                    // hand the resting corpse to the game: its bodies become simulated again, so it can be grabbed and dragged like a vanilla one
+			if ((g_release || (g_probe && s.id <= 2)) && !s.cos.empty()) {                                    // hand the resting corpse to the game: its bodies become simulated again, so it can be grabbed and dragged like a vanilla one
 				int n = 0; g_ours = 1; for (uint32_t co : s.cos) if (GameSetMotionType(co, 1)) n++; g_ours = 0;
-				Log("observe[%u]: at rest after %u frames, released %d game bodies back to simulation", s.id, s.frame, n); return false;
+				Log("observe[%u]: at rest after %u frames, released %d game bodies back to simulation", s.id, s.frame, n);
+				if (g_probe && s.id <= 2) { s.phase = 4; s.frame = 0; return true; }       // keep the session a few frames to watch the now simulated bodies
+				return false;
 			}
 			s.phase = 3; s.hold = 0;
 			if (s.verbose) Log("observe[%u]: body at rest after %u frames, now only holding the final pose", s.id, s.frame);

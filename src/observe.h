@@ -17,5 +17,7 @@ void ObserveSetLimits(int maxActors, float simSeconds, float holdSeconds);
 // KeyframeGameBodies=1 switches the game's own ragdoll bodies to keyframed so they follow the pose we write (loot, bullets and the crosshair then hit the visible body).
 // SkipDismembered=1 leaves actors with cut-off limbs entirely to the game.
 void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered);
+// ReleaseAtRest=1: when the Delirium body comes to rest, the game's bodies are switched back to simulated so the corpse can be grabbed like a vanilla one.
+void ObserveSetRelease(bool on);
 void ObserveSetTuning(float velocityScale, float shotHealth);
 void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell, int half);

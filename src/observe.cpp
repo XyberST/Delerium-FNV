@@ -1,3 +1,4 @@
+#include <cmath>
 #include "observe.h"
 #include "actor.h"
 #include "rig.h"
@@ -18,15 +19,16 @@ static const float kUnit = 0.0142875f;                        // metres per game
 static EngineApi* g_api; static NmBuild* g_fit; static Rig g_rig;
 static bool g_enabled, g_drive = true, g_requireDead = true;
 static int g_maxActors = 4; static float g_simSeconds = 8, g_holdSeconds = 300;
-static bool g_worldCollision, g_calibrate; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
+static bool g_worldCollision, g_calibrate, g_groundAuto, g_groundReady = true, g_release = true; static unsigned g_calibTries; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
 static float g_velScale = 1.0f, g_shotHealth = 1.0f; static bool g_keyframe = true, g_skipDismembered = true;
 static int g_started;                                         // sessions begun this run (verbose logging for the first few only)
 
 void ObserveSetDrive(bool on) { g_drive = on; }
 void ObserveSetRequireDead(bool on) { g_requireDead = on; }
+void ObserveSetRelease(bool on) { g_release = on; }
 void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered) { g_keyframe = keyframeGameBodies; g_skipDismembered = skipDismembered; }
 void ObserveSetTuning(float velocityScale, float shotHealth) { g_velScale = std::max(0.0f, std::min(velocityScale, 4.0f)); g_shotHealth = std::max(0.1f, shotHealth); }
-void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell, int half) { g_worldCollision = collision; g_calibrate = calibrate; g_groundFilter = filter; g_groundCell = std::max(0.15f, cell); g_groundHalf = std::max(2, std::min(half, 16)); }
+void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell, int half) { g_worldCollision = collision; g_calibrate = calibrate; g_groundAuto = filter == 0; g_groundReady = filter != 0; g_groundFilter = filter ? filter : 0x011F0025; g_groundCell = std::max(0.15f, cell); g_groundHalf = std::max(2, std::min(half, 16)); }
 void ObserveSetLimits(int maxActors, float simSeconds, float holdSeconds) { g_maxActors = std::max(1, std::min(maxActors, 8)); g_simSeconds = simSeconds; g_holdSeconds = holdSeconds; }
 void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 	g_api = api; g_fit = (NmBuild*)fit; g_enabled = true;
@@ -35,7 +37,7 @@ void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 }
 
 // ---- death detection (runs inside the probe thunks: tiny and lock-free) ----
-static volatile LONG g_worldCalls, g_oddVt;
+static volatile LONG g_worldCalls, g_oddVt, g_ours;          // g_ours: set while we make our own motion-type calls
 static volatile LONG g_wake[32], g_ww;                      // collision objects the game switched back to a simulated motion type (a grab, an impulse)
 static volatile LONG g_lastDmgActor, g_lastDmgTick;
 static volatile LONG g_q[16], g_qw, g_qr; static volatile LONG g_lastQ, g_lastQTick;
@@ -43,6 +45,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	if (!g_enabled) return;
 	DWORD now = GetTickCount();
 	if (role == kRoleWorld || role == kRolePick) { uint32_t vt = 0; InterlockedIncrement(&g_worldCalls); if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); else g_oddVt = (LONG)vt; return; }   // any call on a bhkWorld tells us the physics world
+	if (role == kRoleMotionType && g_ours) return;
 	if (role == kRoleDamage) { g_lastDmgActor = (LONG)thisPtr; g_lastDmgTick = (LONG)now; }
 	else if (role == kRoleMotionType && (stack[1] == 1 || stack[1] == 2 || stack[1] == 3 || stack[1] == 6) && now - (DWORD)g_lastDmgTick > 100) { LONG w = InterlockedIncrement(&g_ww) - 1; g_wake[w & 31] = (LONG)thisPtr; }
 	else if (role == kRoleMotionType && stack[1] == 1 /* dynamic */ && now - (DWORD)g_lastDmgTick <= 100) {
@@ -107,19 +110,39 @@ static void EnsureWorld(const Session& s) {   // the physics world of this corps
 	else if (g_worldFails++ < 4) Log("ray: physics world not found (%s); world-slot hook calls %ld, last foreign vtable %08X", how, (long)g_worldCalls, (unsigned)g_oddVt);
 }
 
-// One-off calibration on the first corpse: which ray layers see the floor, and which also see the actor itself?
-static void CalibrateRays(const Session& s) {
-	if (!PickWorld()) { Log("ray: no physics world known yet, calibration skipped"); return; }
-	WorldXform pel; if (!NodeWorld(s.bone[0], pel)) return;
-	const float* r = s.rootW.T; Log("ray: bhkWorld %08X, root (%.1f %.1f %.1f), pelvis (%.1f %.1f %.1f)", PickWorld(), r[0], r[1], r[2], pel.T[0], pel.T[1], pel.T[2]);
+// One-off calibration: which ray layers see the floor, which also see the actor itself, and are the ray end points game units or Havok metres?
+struct LayerRes { bool ok = false, floorHit = false, bodyHit = false; float z = 0, nz = 0; };
+static int RunLayers(const Session& s, const char* tag, LayerRes* res) {
+	WorldXform pel; if (!NodeWorld(s.bone[0], pel)) return 0;
+	const float* r = s.rootW.T; int floorHits = 0;
 	for (uint32_t layer = 0; layer < 64; layer++) {
-		uint32_t filter = 0x011F0000u | layer; bool h1 = false, h2 = false; float f1 = 1, f2 = 1, n1[3], n2[3];
+		uint32_t filter = 0x011F0000u | layer; bool h1 = false, h2 = false; float f1 = 1, f2 = 1, n1[3] = {}, n2[3] = {};
 		const float d0[3] = { r[0], r[1], r[2] + 60 }, d1[3] = { r[0], r[1], r[2] - 60 };                         // straight down through the feet
 		const float b0[3] = { pel.T[0] + 80, pel.T[1], pel.T[2] }, b1[3] = { pel.T[0] - 80, pel.T[1], pel.T[2] };   // sideways through the pelvis
 		bool ok1 = PickCast(d0, d1, filter, h1, f1, n1), ok2 = PickCast(b0, b1, filter, h2, f2, n2);
 		if (!ok1 || !ok2) { Log("ray: layer %02X call not possible", layer); continue; }
-		Log("ray: layer %02X  floor %s (z %.1f, normal z %.2f)  body-height %s (fraction %.2f)", layer, h1 ? "HIT " : "miss", r[2] + 60 - 120 * f1, n1[2], h2 ? "HIT " : "miss", f2);
+		res[layer].ok = true; res[layer].floorHit = h1 && f1 < 1.0f; res[layer].bodyHit = h2 && f2 < 1.0f; res[layer].z = r[2] + 60 - 120 * f1; res[layer].nz = n1[2];
+		if (res[layer].floorHit) floorHits++;
+		Log("ray: [%s] layer %02X  floor %s (z %.1f, normal z %.2f)  body-height %s (fraction %.2f)", tag, layer, h1 ? "HIT " : "miss", res[layer].z, n1[2], h2 ? "HIT " : "miss", f2);
 	}
+	return floorHits;
+}
+static bool CalibrateRays(const Session& s) {
+	if (!PickWorld()) { Log("ray: no physics world known yet, calibration skipped"); return false; }
+	WorldXform pel; if (!NodeWorld(s.bone[0], pel)) return false;
+	const float* r = s.rootW.T; Log("ray: bhkWorld %08X, root (%.1f %.1f %.1f), pelvis (%.1f %.1f %.1f)", PickWorld(), r[0], r[1], r[2], pel.T[0], pel.T[1], pel.T[2]);
+	static LayerRes res[64]; for (auto& x : res) x = LayerRes();
+	PickSetScale(kUnit); int fh = RunLayers(s, "metres", res);
+	if (!fh) { PickSetScale(1.0f); fh = RunLayers(s, "raw units", res); if (!fh) { PickSetScale(kUnit); Log("ray: no layer sees the floor with either scale"); return false; } Log("ray: the game's ray cast takes raw game units"); }
+	else Log("ray: the game's ray cast takes Havok metres");
+	if (g_groundAuto) {                                                                      // prefer a layer that finds the floor under the feet but not the corpse itself
+		int pick = -1;
+		for (int pass = 0; pass < 2 && pick < 0; pass++)
+			for (int l = 1; l < 64 && pick < 0; l++) { const LayerRes& x = res[l]; if (x.ok && x.floorHit && std::fabs(x.z - r[2]) <= 25.0f && x.nz > 0.5f && (pass == 1 || !x.bodyHit)) pick = l; }
+		if (pick < 0) { Log("ray: no layer gave a plausible floor under the feet, ground collision stays off"); return true; }
+		g_groundFilter = 0x011F0000u | (uint32_t)pick; g_groundReady = true; Log("ray: ground layer %02X chosen (floor z %.1f vs root z %.1f%s)", pick, res[pick].z, r[2], res[pick].bodyHit ? ", also sees the body" : "");
+	}
+	return true;
 }
 
 // Ground sampler: (x, y) in the actor's root frame, metres. Casts a vertical ray in game space and returns the height in the same frame.
@@ -142,7 +165,7 @@ static void Begin(uint32_t actor) {
 	int sim = 0; for (Session* a : g_active) if (a->phase < 3) sim++;
 	if (sim >= g_maxActors) return;                                                        // only bodies still being simulated count against the limit
 	if (g_active.size() >= 24) for (size_t i = 0; i < g_active.size(); i++) if (g_active[i]->phase == 3) { Free(g_active[i]); delete g_active[i]; g_active.erase(g_active.begin() + i); break; }   // drop the oldest held pose
-	if (g_skipDismembered && ActorHasDismemberedLimbs(actor)) { if (g_started < 6) Log("observe: actor %08X has dismembered limbs, left to the game", actor); g_recent[actor] = now; return; }
+	if (g_skipDismembered && ActorHasDismemberedLimbs(actor)) { if (g_started < 12) { char hex[100] = {}; ActorDismemberDump(actor, hex, sizeof hex); Log("observe: actor %08X has dismembered limbs, left to the game (extra: %s)", actor, hex); } g_recent[actor] = now; return; }
 	g_recent[actor] = now;
 	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->verbose = s->id <= 4;
 	if (s->verbose) Log("observe[%u]: death burst, actor %08X", s->id, actor);
@@ -169,9 +192,9 @@ static void Begin(uint32_t actor) {
 	  for (int i = 0; i < 21; i++) { add(s->bone[i]); add(s->boneA[i]); add(s->boneB[i]); } }
 	memcpy(s->p0, p, sizeof p); memcpy(s->q0, q, sizeof q);
 	if (g_calibrate || g_worldCollision) EnsureWorld(*s);
-	if (g_calibrate && !g_calibDone && PickWorld()) { g_calibDone = true; CalibrateRays(*s); }   // retried on every kill until the world is known
+	if ((g_calibrate || (g_worldCollision && g_groundAuto)) && !g_calibDone && PickWorld()) { bool done = CalibrateRays(*s); if (done || ++g_calibTries >= 3) g_calibDone = true; }   // retried on later kills until it has run
 	
-	if (g_worldCollision && PickWorld()) { s->ground = new GroundGrid(); GroundInit(*s->ground, 0, 0, g_groundCell, g_groundHalf, -1.0f, 0.9f); }
+	if (g_worldCollision && PickWorld() && g_groundReady) { s->ground = new GroundGrid(); GroundInit(*s->ground, 0, 0, g_groundCell, g_groundHalf, -1.0f, 0.9f); }
 	LARGE_INTEGER c; QueryPerformanceCounter(&c); s->t0 = c; s->last = c; s->phase = 1;
 	g_active.push_back(s);
 }
@@ -187,7 +210,8 @@ static void KeyframeGameBodies(Session& s) {
 	for (auto& kv : CollectBones(s.root)) {
 		uint32_t node = kv.second, co = 0, vt = 0, target = 0;
 		if (!Rd(node + 0x1C, &co, 4) || !co || !Rd(co, &vt, 4) || vt != 0x10C53DC || !Rd(co + 8, &target, 4) || target != node) continue;   // must be a bhkBlendCollisionObject pointing back at this node
-		if (GameSetMotionType(co, 4)) { n++; s.cos.push_back(co); } else bad++;
+		g_ours = 1; bool okm = GameSetMotionType(co, 4); g_ours = 0;
+		if (okm) { n++; s.cos.push_back(co); } else bad++;
 	}
 	s.wakeSeen = g_ww;
 	if (s.verbose) Log("observe[%u]: %d of the game's bodies switched to keyframed%s", s.id, n, bad ? " (some failed)" : "");
@@ -323,7 +347,12 @@ static bool Step(Session& s) {
 		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, dev);
 		  if (dev > 1.0f) { std::string nm; NodeName(worstN, nm); Log("observe[%u]   worst bone '%s' off by (%.1f %.1f %.1f)", s.id, nm.c_str(), worstD.x, worstD.y, worstD.z); } }
 		if (s.calm >= 45 || s.frame >= (unsigned)(g_simSeconds * 60)) {
-			Free(&s); s.phase = 3; s.hold = 0;
+			Free(&s);
+			if (g_release && !s.cos.empty()) {                                    // hand the resting corpse to the game: its bodies become simulated again, so it can be grabbed and dragged like a vanilla one
+				int n = 0; g_ours = 1; for (uint32_t co : s.cos) if (GameSetMotionType(co, 1)) n++; g_ours = 0;
+				Log("observe[%u]: at rest after %u frames, released %d game bodies back to simulation", s.id, s.frame, n); return false;
+			}
+			s.phase = 3; s.hold = 0;
 			if (s.verbose) Log("observe[%u]: body at rest after %u frames, now only holding the final pose", s.id, s.frame);
 		}
 		return true;

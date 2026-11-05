@@ -8,6 +8,8 @@
 #include <cstddef>
 void PickSetWorld(uint32_t bhkWorld);            // the world the game is currently picking in; set from the probe on every game call
 uint32_t PickWorld();
+// Ray end points are game units multiplied by this before the call (Havok works in metres, so 0.0142875). Calibration decides which scale the game's PickObject wants.
+void PickSetScale(float s);
 // Finds the bhkWorld of the actor's own cell by walking pointers from TESObjectREFR::parentCell (+0x40), two levels deep. A candidate must have a
 // vtable whose slot 50 is the game's PickObject. Returns 0 if none; 'how' receives where it was found (or why not).
 uint32_t PickFindWorld(uint32_t actor, uint32_t collisionObject, char* how, size_t howLen);

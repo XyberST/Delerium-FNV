@@ -35,18 +35,19 @@ static bool ReadBlock(uint32_t addr, uint32_t* buf, size_t maxDwords, size_t& go
 	for (size_t n = maxDwords; n >= 8; n /= 2) if (Rd(addr, buf, n * 4)) { got = n; return true; }
 	got = 0; return false;
 }
-static uint32_t g_cacheCell, g_cacheWorld;
+static uint32_t g_cacheCell, g_cacheWorld, g_cacheHkw;
 // A bhkWorld keeps its hkpWorld at +8 (bhkRefObject). We know the hkpWorld from the actor's own body (collision object +0x10 -> body, +8 -> hkp body, +8 -> hkpWorld),
 // so any object whose +8 is that hkpWorld and whose first dword is a code-section vtable is the bhkWorld. Checked in memory while walking the cell, no per-candidate reads.
 static bool IsRdata(uint32_t v) { return v >= 0x1000000 && v < 0x1300000 && !(v & 3); }
 uint32_t PickFindWorld(uint32_t actor, uint32_t co, char* how, size_t howLen) {
 	uint32_t cell = 0; if (!Rd(actor + 0x40, &cell, 4) || cell < 0x10000) { snprintf(how, howLen, "actor has no parent cell"); return 0; }
-	if (cell == g_cacheCell && g_cacheWorld && LooksLikeWorld(g_cacheWorld)) { snprintf(how, howLen, "cached, cell %08X", cell); return g_cacheWorld; }
 	uint32_t body = 0, hkb = 0, hkw = 0;
 	if (co) { Rd(co + 0x10, &body, 4); if (body) Rd(body + 8, &hkb, 4); if (hkb) Rd(hkb + 8, &hkw, 4); }
+	if (hkw && hkw == g_cacheHkw && g_cacheWorld) { uint32_t b = 0; if (Rd(g_cacheWorld + 8, &b, 4) && b == hkw) { snprintf(how, howLen, "cached by hkpWorld %08X", hkw); return g_cacheWorld; } }   // one hkpWorld serves many cells
+	if (!hkw && cell == g_cacheCell && g_cacheWorld && LooksLikeWorld(g_cacheWorld)) { snprintf(how, howLen, "cached, cell %08X", cell); return g_cacheWorld; }
 	static uint32_t l0[128], l1[64], l2[4]; size_t n0 = 0, n1 = 0;
 	if (!ReadBlock(cell, l0, 128, n0)) { snprintf(how, howLen, "cell %08X unreadable", cell); return 0; }
-	auto accept = [&](uint32_t w, const char* by, unsigned a, unsigned b2) { g_cacheCell = cell; g_cacheWorld = w; snprintf(how, howLen, "%s cell %08X +0x%X +0x%X", by, cell, a, b2); return w; };
+	auto accept = [&](uint32_t w, const char* by, unsigned a, unsigned b2) { g_cacheCell = cell; g_cacheWorld = w; g_cacheHkw = hkw; snprintf(how, howLen, "%s cell %08X +0x%X +0x%X", by, cell, a, b2); return w; };
 	for (size_t i = 0; i < n0; i++) if (l0[i] != cell && LooksLikeWorld(l0[i])) return accept(l0[i], "vtable", (unsigned)(i * 4), 0);
 	unsigned reads = 0, reads2 = 0;
 	for (size_t i = 0; i < n0; i++) {
@@ -62,6 +63,8 @@ uint32_t PickFindWorld(uint32_t actor, uint32_t co, char* how, size_t howLen) {
 	snprintf(how, howLen, "cell %08X, %u+%u pointers followed; co %08X body %08X hkpBody %08X hkpWorld %08X", cell, reads, reads2, co, body, hkb, hkw); return 0;
 }
 
+static float g_pickScale = 0.0142875f;
+void PickSetScale(float s) { g_pickScale = s; }
 bool PickCast(const float from[3], const float to[3], uint32_t filter, bool& hit, float& fraction, float normal[3]) {
 	uint32_t world = PickWorld(); if (!world) return false;
 	static uint8_t* blk = (uint8_t*)_aligned_malloc(0x100, 16);
@@ -69,7 +72,7 @@ bool PickCast(const float from[3], const float to[3], uint32_t filter, bool& hit
 	if (!checked) { checked = true; uint8_t b[6] = {}; ok = Rd(kPickObject, b, 6) && b[0] == 0x55 && b[1] == 0x8B && b[2] == 0xEC; if (!ok) Log("pick: prologue of 0xC696D0 is not as expected, ray casts disabled"); }
 	if (!ok || !blk) return false;
 	memset(blk, 0, 0x100);
-	float* f = (float*)blk; f[0] = from[0]; f[1] = from[1]; f[2] = from[2]; f[3] = 0; f[4] = to[0]; f[5] = to[1]; f[6] = to[2]; f[7] = 0;
+	float* f = (float*)blk; const float k = g_pickScale; f[0] = from[0] * k; f[1] = from[1] * k; f[2] = from[2] * k; f[3] = 0; f[4] = to[0] * k; f[5] = to[1] * k; f[6] = to[2] * k; f[7] = 0;
 	*(uint32_t*)(blk + 0x24) = filter; *(float*)(blk + 0x40) = 1.0f; *(int32_t*)(blk + 0x44) = -1; *(int32_t*)(blk + 0x50) = -1;
 	uint8_t old = 0, one = 1; bool gate = Rd(kPickGate, &old, 1); if (gate) Wr(kPickGate, &one, 1);
 	hit = false; bool called = Call((PickFn)(uintptr_t)kPickObject, (void*)(uintptr_t)world, blk, hit);

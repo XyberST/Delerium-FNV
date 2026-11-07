@@ -301,16 +301,19 @@ static bool SetupDriveBodies(Session& s) {
 static void DriveBodies(Session& s, const float* tr) {
 	V3 P[21]; Q Qp[21];
 	for (int i = 0; i < 21; i++) { P[i] = { tr[i * 7], tr[i * 7 + 1], tr[i * 7 + 2] }; Qp[i] = norm({ tr[i * 7 + 3], tr[i * 7 + 4], tr[i * 7 + 5], tr[i * 7 + 6] }); }
-	const float tau = 0.04f, maxLin = g_driveMax / kUnit / 7.0f, maxAng = 25.0f;    // Havok units per second = game units per second / 7
+	const float tau = 0.06f, maxLin = g_driveMax / kUnit / 7.0f, maxAng = 20.0f;
+	// Blocked bodies (a fence, a wall) must not be pushed ever harder: that tunnels them through. The further behind the bodies are on average, the softer the push.
+	const float soft = s.driveErr > 60.0f ? std::max(0.2f, 60.0f / s.driveErr) : 1.0f;    // Havok units per second = game units per second / 7
 	float errSum = 0; unsigned n = 0;
 	for (auto& d : s.dbodies) {
 		WorldXform tw, now; if (!TargetWorld(s, P, Qp, d.node, tw) || !NodeWorld(d.node, now)) continue;
 		V3 e{ tw.T[0] - now.T[0], tw.T[1] - now.T[1], tw.T[2] - now.T[2] }; errSum += len(e); n++;
-		V3 lin = e * (g_driveGain / tau / 7.0f); float ll = len(lin); if (ll > maxLin) lin = lin * (maxLin / ll);
+		if (len(e) > 50.0f) e = e * (50.0f / len(e));                                  // never ask for more than about 0.7 m of catching up at once
+		V3 lin = e * (g_driveGain * soft / tau / 7.0f); float ll = len(lin); if (ll > maxLin) lin = lin * (maxLin / ll);
 		float Re[9]; for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) Re[r * 3 + c] = tw.R[r * 3] * now.R[c * 3] + tw.R[r * 3 + 1] * now.R[c * 3 + 1] + tw.R[r * 3 + 2] * now.R[c * 3 + 2];   // target * current^T
 		normaliseCols(Re); Q q = norm(fromMat(Re)); if (q.w < 0) { q = { -q.x, -q.y, -q.z, -q.w }; }
 		float sh = std::sqrt(std::max(0.0f, 1.0f - q.w * q.w)); float ang = 2.0f * std::atan2(sh, q.w);
-		V3 axis = sh > 1e-4f ? V3{ q.x / sh, q.y / sh, q.z / sh } : V3{ 0, 0, 0 }; V3 w = axis * (ang * g_driveGain / tau); float wl = len(w); if (wl > maxAng) w = w * (maxAng / wl);
+		V3 axis = sh > 1e-4f ? V3{ q.x / sh, q.y / sh, q.z / sh } : V3{ 0, 0, 0 }; V3 w = axis * (ang * g_driveGain * soft / tau); float wl = len(w); if (wl > maxAng) w = w * (maxAng / wl);
 		const float lv[3] = { lin.x, lin.y, lin.z }, av[3] = { w.x, w.y, w.z }; GameSetBodyVelocity(d.body, lv, av);
 	}
 	s.nWritten = n; if (n) { float m = errSum / n; if (s.firstErr < 0) s.firstErr = m; s.driveErr = m; }
@@ -453,9 +456,9 @@ static bool Step(Session& s) {
 		if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false;
 		if (s.mode == 1) {
 			DriveBodies(s, s.tr);
-			if (s.frame == 60 && s.driveErr > 140.0f) {                                              // the bodies are not following (still animation driven?): go back to writing bones
-				Log("observe[%u]: the game's bodies did not follow (mean error %.0f units after 60 frames), falling back to writing bones", s.id, s.driveErr);
-				s.mode = 0; KeyframeGameBodies(s);
+			if (s.frame >= 30 && s.driveErr > 220.0f) {                                              // Delirium and the game's bodies have parted ways (blocked, or the bodies are not following): the game carries on alone
+				Log("observe[%u]: the game's bodies are %.0f units from the target after %u frames, leaving the corpse to the game", s.id, s.driveErr, s.frame);
+				Free(&s); return false;
 			}
 		} else if (g_drive) Drive(s, s.tr);
 		float fastest = 0;

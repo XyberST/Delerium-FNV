@@ -19,7 +19,7 @@ static const float kUnit = 0.0142875f;                        // metres per game
 static EngineApi* g_api; static NmBuild* g_fit; static Rig g_rig;
 static bool g_enabled, g_drive = true, g_requireDead = true;
 static int g_maxActors = 4; static float g_simSeconds = 8, g_holdSeconds = 300;
-static bool g_balance = true, g_dismemberedOk = true; static float g_balanceHealth = 75.0f, g_balanceSeconds = 2.0f, g_balanceMaxSpeed = 6.0f;
+static bool g_balance = true, g_dismemberedOk = true; static float g_balanceHealth = 120.0f, g_balanceSeconds = 2.0f, g_balanceMaxSpeed = 6.0f, g_balanceFall = 1.0f, g_balanceVelScale = 0.5f; static int g_balanceSteps = 8; static bool g_balancePush = true;
 static bool g_driveBodies = true; static float g_driveGain = 1.0f, g_driveMax = 8.0f, g_driveAngGain = 0.4f;
 static bool g_worldCollision, g_calibrate, g_groundAuto, g_groundReady = true, g_release = true; static unsigned g_calibTries; static float g_restSpeed = 1.5f; static unsigned g_restFrames = 30; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
 static float g_velScale = 1.0f, g_shotHealth = 1.0f; static bool g_keyframe = true, g_skipDismembered = true;
@@ -29,6 +29,7 @@ void ObserveSetDrive(bool on) { g_drive = on; }
 void ObserveSetRequireDead(bool on) { g_requireDead = on; }
 void ObserveSetDriveBodies(bool on, float gain, float maxSpeed, float angGain) { g_driveBodies = on; g_driveGain = gain; g_driveMax = maxSpeed; g_driveAngGain = angGain; }
 void ObserveSetBalance(bool on, float health, float seconds, float maxSpeed, bool dismemberedOk) { g_balance = on; g_balanceHealth = health; g_balanceSeconds = seconds; g_balanceMaxSpeed = maxSpeed; g_dismemberedOk = dismemberedOk; }
+void ObserveSetBalanceMore(float fallSeconds, int steps, float velocityScale, bool push) { g_balanceFall = fallSeconds; g_balanceSteps = steps; g_balanceVelScale = velocityScale; g_balancePush = push; }
 void ObserveSetRelease(bool on, float restSpeed, unsigned restFrames) { g_release = on; g_restSpeed = restSpeed; g_restFrames = restFrames; }
 void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered) { g_keyframe = keyframeGameBodies; g_skipDismembered = skipDismembered; }
 void ObserveSetTuning(float velocityScale, float shotHealth) { g_velScale = std::max(0.0f, std::min(velocityScale, 4.0f)); g_shotHealth = std::max(0.1f, shotHealth); }
@@ -74,6 +75,7 @@ struct Session {
 	float tr[21 * 7]{}, prev[21 * 3]{}, driveErr = 0;
 	std::map<uint32_t, V3> wrote;                               // game-world bone translation we last wrote
 	std::vector<uint32_t> cos; LONG wakeSeen = 0;
+	float balanceT = 0, balanceFor = 0; bool relaxed = false;
 	unsigned hiddenMask = 0; bool headGone = false, balancing = false;   // rig parts whose bones are scaled away (cut off); head among them; trying to stay on its feet
 	int mode = 0;                                               // 1 = the game's own bodies are driven by velocity; 0 = bones are written (old way)
 	struct DBody { uint32_t node, body; }; std::vector<DBody> dbodies; float firstErr = -1;                // the game's collision objects we keyframed; wake calls already looked at
@@ -325,7 +327,8 @@ static void DriveBodies(Session& s, const float* tr) {
 		float Re[9]; for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) Re[r * 3 + c] = tw.R[r * 3] * now.R[c * 3] + tw.R[r * 3 + 1] * now.R[c * 3 + 1] + tw.R[r * 3 + 2] * now.R[c * 3 + 2];   // target * current^T
 		normaliseCols(Re); Q q = norm(fromMat(Re)); if (q.w < 0) { q = { -q.x, -q.y, -q.z, -q.w }; }
 		float sh = std::sqrt(std::max(0.0f, 1.0f - q.w * q.w)); float ang = 2.0f * std::atan2(sh, q.w);
-		V3 axis = sh > 1e-4f ? V3{ q.x / sh, q.y / sh, q.z / sh } : V3{ 0, 0, 0 }; V3 w = axis * (ang * g_driveAngGain * soft / tau);   // turning is driven more gently than moving: the game's joints do not allow Delirium's every twist float wl = len(w); if (wl > maxAng) w = w * (maxAng / wl);
+		V3 axis = sh > 1e-4f ? V3{ q.x / sh, q.y / sh, q.z / sh } : V3{ 0, 0, 0 }; V3 w = axis * (ang * g_driveAngGain * soft / tau);   // turning is driven more gently than moving: the game's joints do not allow Delirium's every twist
+		float wl = len(w); if (wl > maxAng) w = w * (maxAng / wl);
 		const float lv[3] = { lin.x, lin.y, lin.z }, av[3] = { w.x, w.y, w.z }; GameSetBodyVelocity(d.body, lv, av);
 	}
 	s.nWritten = n; if (n) { float m = errSum / n; if (s.firstErr < 0) s.firstErr = m; s.driveErr = m; }
@@ -342,11 +345,14 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	if (s.verbose) Log("observe[%u]: actor %08X life state %u one frame after the burst", s.id, s.actor, ls);
 	if (g_requireDead && ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: not dying or dead, leaving it to the game", s.id); return false; }
 	float st[21 * 13], zp[21 * 7]; V3 vel[21];
+	const float chestSpeed = len(p[10] - s.p0[10]) * g_velScale / dt;                           // how hard the kill threw the chest
+	const bool willBalance = g_balance && !s.headGone && chestSpeed <= g_balanceMaxSpeed;
+	const float vs = g_velScale * (willBalance ? g_balanceVelScale : 1.0f);                       // a body that is meant to stay up inherits less of the kill's motion
 	for (int i = 0; i < 21; i++) {
-		vel[i] = (p[i] - s.p0[i]) * (g_velScale / dt);
+		vel[i] = (p[i] - s.p0[i]) * (vs / dt);
 		Q dq = mul(q[i], conj(s.q0[i])); if (dq.w < 0) dq = { -dq.x, -dq.y, -dq.z, -dq.w };
 		float w = std::min(1.0f, dq.w), ang = 2 * std::acos(w), sn = std::sqrt(std::max(0.0f, 1 - w * w));
-		V3 av = sn > 1e-5f ? V3{ dq.x / sn, dq.y / sn, dq.z / sn } * (ang * g_velScale / dt) : V3{ 0, 0, 0 };
+		V3 av = sn > 1e-5f ? V3{ dq.x / sn, dq.y / sn, dq.z / sn } * (ang * vs / dt) : V3{ 0, 0, 0 };
 		float* o = st + i * 13; o[0] = p[i].x; o[1] = p[i].y; o[2] = p[i].z; o[3] = q[i].x; o[4] = q[i].y; o[5] = q[i].z; o[6] = q[i].w;
 		o[7] = vel[i].x; o[8] = vel[i].y; o[9] = vel[i].z; o[10] = av.x; o[11] = av.y; o[12] = av.z;
 		float* t = zp + i * 7; t[0] = p[i].x; t[1] = p[i].y; t[2] = p[i].z; t[3] = q[i].x; t[4] = q[i].y; t[5] = q[i].z; t[6] = q[i].w;
@@ -375,12 +381,14 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	V3 chest = p[10], cv = vel[10]; float hs = std::sqrt(cv.x * cv.x + cv.y * cv.y);
 	float at[3] = { chest.x, chest.y, chest.z }, dir[3] = { hs > 0.05f ? cv.x / hs : 0.0f, hs > 0.05f ? cv.y / hs : 1.0f, 0.0f };
 	float health = g_shotHealth;                                                              // 'fatal' by default: the body collapses at once
-	if (g_balance && !s.headGone && len(cv) <= g_balanceMaxSpeed) {                          // dying but not thrown: try to stay on its feet for a moment, like a euphoria ragdoll
-		const float r = (float)((c.QuadPart >> 3) & 1023) / 1023.0f, sec = g_balanceSeconds * (0.7f + 0.6f * r);
-		g_api->nm_set_task_param("NMShot_Standing", "*", "shotRelaxPeriod_Injured", sec);
-		health = g_balanceHealth; s.balancing = true;
-		if (s.verbose) Log("observe[%u]: trying to balance for about %.1f s", s.id, sec);
-	} else if (s.verbose && g_balance) Log("observe[%u]: no balancing (%s)", s.id, s.headGone ? "head is gone" : "thrown too hard");
+	if (willBalance) {                                                                         // dying but not thrown: stay on its feet and stumble for a moment, then give up
+		const float r = (float)((c.QuadPart >> 3) & 1023) / 1023.0f;
+		s.balanceFor = g_balanceSeconds * (0.7f + 0.6f * r); s.balanceT = 0; s.relaxed = false;
+		g_api->nm_set_task_param("NMShot_Standing", "*", "shotMaxSteps", (float)g_balanceSteps);
+		health = g_balanceHealth; s.balancing = true;                                             // 100 or more keeps the body upright until we tell it to relax
+		if (!g_balancePush) { dir[0] = dir[1] = dir[2] = 0.0f; }
+		if (s.verbose) Log("observe[%u]: balancing for about %.1f s (chest speed %.1f m/s)", s.id, s.balanceFor, chestSpeed);
+	} else if (s.verbose && g_balance) Log("observe[%u]: no balancing (%s, chest speed %.1f m/s)", s.id, s.headGone ? "head is gone" : "thrown too hard", chestSpeed);
 	g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, health);
 	s.last = c; s.frame = 0; s.phase = 2;
 	s.mode = (g_driveBodies && SetupDriveBodies(s)) ? 1 : 0;
@@ -478,11 +486,20 @@ static bool Step(Session& s) {
 		float wall = (float)((double)(c.QuadPart - s.last.QuadPart) / (double)f.QuadPart); s.last = c;
 		s.frame++; float wallMs = wall * 1000, dt = GameDt(wall);       // dt is game seconds: scaled by VATS and slow motion
 		uint32_t worstN = 0; V3 worstD{ 0, 0, 0 }; float dev = (s.verbose && (s.frame == 1 || s.frame % 60 == 0)) ? Deviation(s, &worstN, &worstD) : 0;
+		if (s.balancing && !s.relaxed) {
+			s.balanceT += dt;
+			if (s.balanceT >= s.balanceFor || g_api->nm_agent_has_fallen(s.agent)) {
+				s.relaxed = true;
+				g_api->nm_msg_begin(s.agent, "stayUpright"); g_api->nm_msg_set_bool(s.agent, "start", 0); g_api->nm_msg_send(s.agent, s.world);
+				g_api->nm_msg_begin(s.agent, "shotRelax"); g_api->nm_msg_set_float(s.agent, "relaxPeriod", g_balanceFall); g_api->nm_msg_send(s.agent, s.world);
+				if (s.verbose) Log("observe[%u]: out of strength after %.1f s, going down", s.id, s.balanceT);
+			}
+		}
 		g_api->nm_agent_step(s.agent, s.world, dt);
 		if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false;
 		if (s.mode == 1) {
 			if (s.balancing && !s.headGone && (s.frame & 3) == 0 && (HiddenMask(s) & HeadMask())) {   // the head was just shot off: no more balancing
-				s.headGone = true; s.balancing = false;
+				s.headGone = true; s.balancing = false; s.relaxed = true;
 				const float at[3] = { s.tr[70], s.tr[71], s.tr[72] }, dir[3] = { 0, 0, 0 }; g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, g_shotHealth);
 				Log("observe[%u]: head cut off, collapsing", s.id);
 			}

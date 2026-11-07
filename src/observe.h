@@ -28,3 +28,5 @@ void ObserveSetDriveBodies(bool on, float gain, float maxSpeed, float angularGai
 // BalanceWhenDying: a dying body that was not thrown hard and still has its head tries to stay on its feet (engine 'health' = healthWhileBalancing, about 'seconds' before it gives up).
 // DismemberedGetDelirium: kills with a cut-off limb are driven too (the cut-off parts are left to the game).
 void ObserveSetBalance(bool on, float health, float seconds, float maxSpeed, bool dismemberedOk);
+// BalanceFallSeconds: how long the body takes to go limp once its strength runs out; BalanceSteps: how many stumbling steps it may take; BalanceVelocityScale: how much of the kill's motion a balancing body inherits; push: use the engine's standard shot push.
+void ObserveSetBalanceMore(float fallSeconds, int steps, float velocityScale, bool push);

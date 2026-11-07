@@ -19,14 +19,14 @@ static const float kUnit = 0.0142875f;                        // metres per game
 static EngineApi* g_api; static NmBuild* g_fit; static Rig g_rig;
 static bool g_enabled, g_drive = true, g_requireDead = true;
 static int g_maxActors = 4; static float g_simSeconds = 8, g_holdSeconds = 300;
-static bool g_driveBodies = true; static float g_driveGain = 1.0f, g_driveMax = 12.0f;
+static bool g_driveBodies = true; static float g_driveGain = 1.0f, g_driveMax = 8.0f, g_driveAngGain = 0.4f;
 static bool g_worldCollision, g_calibrate, g_groundAuto, g_groundReady = true, g_release = true; static unsigned g_calibTries; static float g_restSpeed = 1.5f; static unsigned g_restFrames = 30; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
 static float g_velScale = 1.0f, g_shotHealth = 1.0f; static bool g_keyframe = true, g_skipDismembered = true;
 static int g_started;                                         // sessions begun this run (verbose logging for the first few only)
 
 void ObserveSetDrive(bool on) { g_drive = on; }
 void ObserveSetRequireDead(bool on) { g_requireDead = on; }
-void ObserveSetDriveBodies(bool on, float gain, float maxSpeed) { g_driveBodies = on; g_driveGain = gain; g_driveMax = maxSpeed; }
+void ObserveSetDriveBodies(bool on, float gain, float maxSpeed, float angGain) { g_driveBodies = on; g_driveGain = gain; g_driveMax = maxSpeed; g_driveAngGain = angGain; }
 void ObserveSetRelease(bool on, float restSpeed, unsigned restFrames) { g_release = on; g_restSpeed = restSpeed; g_restFrames = restFrames; }
 void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered) { g_keyframe = keyframeGameBodies; g_skipDismembered = skipDismembered; }
 void ObserveSetTuning(float velocityScale, float shotHealth) { g_velScale = std::max(0.0f, std::min(velocityScale, 4.0f)); g_shotHealth = std::max(0.1f, shotHealth); }
@@ -301,7 +301,7 @@ static bool SetupDriveBodies(Session& s) {
 static void DriveBodies(Session& s, const float* tr) {
 	V3 P[21]; Q Qp[21];
 	for (int i = 0; i < 21; i++) { P[i] = { tr[i * 7], tr[i * 7 + 1], tr[i * 7 + 2] }; Qp[i] = norm({ tr[i * 7 + 3], tr[i * 7 + 4], tr[i * 7 + 5], tr[i * 7 + 6] }); }
-	const float tau = 0.06f, maxLin = g_driveMax / kUnit / 7.0f, maxAng = 20.0f;
+	const float tau = 0.06f, maxLin = g_driveMax / kUnit / 7.0f, maxAng = 10.0f;
 	// Blocked bodies (a fence, a wall) must not be pushed ever harder: that tunnels them through. The further behind the bodies are on average, the softer the push.
 	const float soft = s.driveErr > 60.0f ? std::max(0.2f, 60.0f / s.driveErr) : 1.0f;    // Havok units per second = game units per second / 7
 	float errSum = 0; unsigned n = 0;
@@ -313,10 +313,16 @@ static void DriveBodies(Session& s, const float* tr) {
 		float Re[9]; for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) Re[r * 3 + c] = tw.R[r * 3] * now.R[c * 3] + tw.R[r * 3 + 1] * now.R[c * 3 + 1] + tw.R[r * 3 + 2] * now.R[c * 3 + 2];   // target * current^T
 		normaliseCols(Re); Q q = norm(fromMat(Re)); if (q.w < 0) { q = { -q.x, -q.y, -q.z, -q.w }; }
 		float sh = std::sqrt(std::max(0.0f, 1.0f - q.w * q.w)); float ang = 2.0f * std::atan2(sh, q.w);
-		V3 axis = sh > 1e-4f ? V3{ q.x / sh, q.y / sh, q.z / sh } : V3{ 0, 0, 0 }; V3 w = axis * (ang * g_driveGain * soft / tau); float wl = len(w); if (wl > maxAng) w = w * (maxAng / wl);
+		V3 axis = sh > 1e-4f ? V3{ q.x / sh, q.y / sh, q.z / sh } : V3{ 0, 0, 0 }; V3 w = axis * (ang * g_driveAngGain * soft / tau);   // turning is driven more gently than moving: the game's joints do not allow Delirium's every twist float wl = len(w); if (wl > maxAng) w = w * (maxAng / wl);
 		const float lv[3] = { lin.x, lin.y, lin.z }, av[3] = { w.x, w.y, w.z }; GameSetBodyVelocity(d.body, lv, av);
 	}
 	s.nWritten = n; if (n) { float m = errSum / n; if (s.firstErr < 0) s.firstErr = m; s.driveErr = m; }
+}
+
+// When the drive ends, the bodies still carry the last velocity we gave them. Left alone they shoot off once ("the corpse jumps"), so stop them first.
+static void StopDrive(Session& s) {
+	const float z[3] = { 0, 0, 0 };
+	for (auto& d : s.dbodies) GameSetBodyVelocity(d.body, z, z);
 }
 
 static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, float dt) {
@@ -458,7 +464,7 @@ static bool Step(Session& s) {
 			DriveBodies(s, s.tr);
 			if (s.frame >= 30 && s.driveErr > 220.0f) {                                              // Delirium and the game's bodies have parted ways (blocked, or the bodies are not following): the game carries on alone
 				Log("observe[%u]: the game's bodies are %.0f units from the target after %u frames, leaving the corpse to the game", s.id, s.driveErr, s.frame);
-				Free(&s); return false;
+				StopDrive(s); Free(&s); return false;
 			}
 		} else if (g_drive) Drive(s, s.tr);
 		float fastest = 0;
@@ -470,7 +476,7 @@ static bool Step(Session& s) {
 		  if (dev > 1.0f && s.mode == 0) { std::string nm; NodeName(worstN, nm); Log("observe[%u]   worst bone '%s' off by (%.1f %.1f %.1f)", s.id, nm.c_str(), worstD.x, worstD.y, worstD.z); } }
 		if (s.calm >= g_restFrames || s.frame >= (unsigned)(g_simSeconds * 60)) {
 			Free(&s);
-			if (s.mode == 1) { Log("observe[%u]: at rest after %u frames, the game's bodies carry on from here", s.id, s.frame); return false; }
+			if (s.mode == 1) { StopDrive(s); Log("observe[%u]: at rest after %u frames, the game's bodies carry on from here", s.id, s.frame); return false; }
 			if ((g_release || (g_probe && s.id <= 2)) && !s.cos.empty()) {                                    // hand the resting corpse to the game: its bodies become simulated again, so it can be grabbed and dragged like a vanilla one
 				int n = 0; g_ours = 1; for (uint32_t co : s.cos) if (GameSetMotionType(co, 1)) n++; g_ours = 0;
 				Log("observe[%u]: at rest after %u frames, released %d game bodies back to simulation", s.id, s.frame, n);

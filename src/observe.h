@@ -23,4 +23,4 @@ void ObserveSetTuning(float velocityScale, float shotHealth);
 void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell, int half);
 
 // DriveGameBodies=1: Delirium's pose is applied as velocities to the game's own bodies instead of writing bones. gain scales the correction, maxSpeed is in m/s.
-void ObserveSetDriveBodies(bool on, float gain, float maxSpeed);
+void ObserveSetDriveBodies(bool on, float gain, float maxSpeed, float angularGain);

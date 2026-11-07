@@ -24,3 +24,7 @@ void ObserveSetWorld(bool collision, bool calibrate, uint32_t filter, float cell
 
 // DriveGameBodies=1: Delirium's pose is applied as velocities to the game's own bodies instead of writing bones. gain scales the correction, maxSpeed is in m/s.
 void ObserveSetDriveBodies(bool on, float gain, float maxSpeed, float angularGain);
+
+// BalanceWhenDying: a dying body that was not thrown hard and still has its head tries to stay on its feet (engine 'health' = healthWhileBalancing, about 'seconds' before it gives up).
+// DismemberedGetDelirium: kills with a cut-off limb are driven too (the cut-off parts are left to the game).
+void ObserveSetBalance(bool on, float health, float seconds, float maxSpeed, bool dismemberedOk);

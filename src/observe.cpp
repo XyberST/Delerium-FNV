@@ -19,6 +19,7 @@ static const float kUnit = 0.0142875f;                        // metres per game
 static EngineApi* g_api; static NmBuild* g_fit; static Rig g_rig;
 static bool g_enabled, g_drive = true, g_requireDead = true;
 static int g_maxActors = 4; static float g_simSeconds = 8, g_holdSeconds = 300;
+static bool g_balance = true, g_dismemberedOk = true; static float g_balanceHealth = 75.0f, g_balanceSeconds = 2.0f, g_balanceMaxSpeed = 6.0f;
 static bool g_driveBodies = true; static float g_driveGain = 1.0f, g_driveMax = 8.0f, g_driveAngGain = 0.4f;
 static bool g_worldCollision, g_calibrate, g_groundAuto, g_groundReady = true, g_release = true; static unsigned g_calibTries; static float g_restSpeed = 1.5f; static unsigned g_restFrames = 30; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
 static float g_velScale = 1.0f, g_shotHealth = 1.0f; static bool g_keyframe = true, g_skipDismembered = true;
@@ -27,6 +28,7 @@ static int g_started;                                         // sessions begun 
 void ObserveSetDrive(bool on) { g_drive = on; }
 void ObserveSetRequireDead(bool on) { g_requireDead = on; }
 void ObserveSetDriveBodies(bool on, float gain, float maxSpeed, float angGain) { g_driveBodies = on; g_driveGain = gain; g_driveMax = maxSpeed; g_driveAngGain = angGain; }
+void ObserveSetBalance(bool on, float health, float seconds, float maxSpeed, bool dismemberedOk) { g_balance = on; g_balanceHealth = health; g_balanceSeconds = seconds; g_balanceMaxSpeed = maxSpeed; g_dismemberedOk = dismemberedOk; }
 void ObserveSetRelease(bool on, float restSpeed, unsigned restFrames) { g_release = on; g_restSpeed = restSpeed; g_restFrames = restFrames; }
 void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered) { g_keyframe = keyframeGameBodies; g_skipDismembered = skipDismembered; }
 void ObserveSetTuning(float velocityScale, float shotHealth) { g_velScale = std::max(0.0f, std::min(velocityScale, 4.0f)); g_shotHealth = std::max(0.1f, shotHealth); }
@@ -72,6 +74,7 @@ struct Session {
 	float tr[21 * 7]{}, prev[21 * 3]{}, driveErr = 0;
 	std::map<uint32_t, V3> wrote;                               // game-world bone translation we last wrote
 	std::vector<uint32_t> cos; LONG wakeSeen = 0;
+	unsigned hiddenMask = 0; bool headGone = false, balancing = false;   // rig parts whose bones are scaled away (cut off); head among them; trying to stay on its feet
 	int mode = 0;                                               // 1 = the game's own bodies are driven by velocity; 0 = bones are written (old way)
 	struct DBody { uint32_t node, body; }; std::vector<DBody> dbodies; float firstErr = -1;                // the game's collision objects we keyframed; wake calls already looked at
 };
@@ -180,6 +183,12 @@ static bool GroundRayCb(void* ctx, float x, float y, float& z) {
 	z = (top - (top - bottom) * fr - s.rootW.T[2]) / toUnits; s.groundHits++; return true;
 }
 
+static unsigned HiddenMask(const Session& s) {                    // bit i set = rig part i's bone is scaled to (almost) nothing, i.e. cut off
+	const float base = s.rootW.S != 0 ? s.rootW.S : 1.0f; unsigned m = 0;
+	for (int i = 0; i < 21; i++) { WorldXform w; if (NodeWorld(s.bone[i], w) && w.S < 0.2f * base) m |= 1u << i; }
+	return m;
+}
+static unsigned HeadMask() { static unsigned m = 0; if (!m) for (int i = 0; i < 21; i++) if (g_rig.part[i].ref.find("Head") != std::string::npos) m |= 1u << i; return m; }
 static int HiddenLimb(const Session& s) {                        // index of a rig part whose bone is scaled to (almost) nothing, or -1
 	const float base = s.rootW.S != 0 ? s.rootW.S : 1.0f;
 	for (int i = 0; i < 21; i++) { WorldXform w; if (NodeWorld(s.bone[i], w) && w.S < 0.2f * base) return i; }
@@ -206,8 +215,10 @@ static void Begin(uint32_t actor) {
 		if (!s->bone[i] || !s->boneA[i] || !s->boneB[i]) { Log("observe[%u]: bone '%s' not found on this actor (not a humanoid?), skipping", s->id, g_rig.part[i].ref.c_str()); delete s; return; }
 	}
 	if (g_skipDismembered) {                                                                // a cut-off limb is hidden by scaling its bone to nothing; only those actors are left to the game
+		s->hiddenMask = HiddenMask(*s); s->headGone = (s->hiddenMask & HeadMask()) != 0;
 		int hid = HiddenLimb(*s);
-		if (hid >= 0) { Log("observe: actor %08X has a cut-off limb ('%s' scaled away), left to the game", actor, g_rig.part[hid].ref.c_str()); delete s; return; }
+		if (hid >= 0 && !(g_dismemberedOk && g_driveBodies)) { Log("observe: actor %08X has a cut-off limb ('%s' scaled away), left to the game", actor, g_rig.part[hid].ref.c_str()); delete s; return; }
+		if (hid >= 0 && s->verbose) Log("observe[%u]: cut-off limb ('%s'): the rest of the body still gets Delirium%s", s->id, g_rig.part[hid].ref.c_str(), s->headGone ? ", and falls at once (no head)" : "");
 	}
 	for (int i = 0; i < 21; i++) {
 		if (!g_rig.part[i].write) continue;
@@ -307,6 +318,7 @@ static void DriveBodies(Session& s, const float* tr) {
 	float errSum = 0; unsigned n = 0;
 	for (auto& d : s.dbodies) {
 		WorldXform tw, now; if (!TargetWorld(s, P, Qp, d.node, tw) || !NodeWorld(d.node, now)) continue;
+		if (now.S < 0.2f * (s.rootW.S != 0 ? s.rootW.S : 1.0f)) continue;                 // a cut-off limb is the game's business
 		V3 e{ tw.T[0] - now.T[0], tw.T[1] - now.T[1], tw.T[2] - now.T[2] }; errSum += len(e); n++;
 		if (len(e) > 50.0f) e = e * (50.0f / len(e));                                  // never ask for more than about 0.7 m of catching up at once
 		V3 lin = e * (g_driveGain * soft / tau / 7.0f); float ll = len(lin); if (ll > maxLin) lin = lin * (maxLin / ll);
@@ -362,9 +374,17 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	g_api->nm_agent_set_part_states(s.agent, st, 21); g_api->nm_agent_set_zero_pose(s.agent, zp, 21);
 	V3 chest = p[10], cv = vel[10]; float hs = std::sqrt(cv.x * cv.x + cv.y * cv.y);
 	float at[3] = { chest.x, chest.y, chest.z }, dir[3] = { hs > 0.05f ? cv.x / hs : 0.0f, hs > 0.05f ? cv.y / hs : 1.0f, 0.0f };
-	g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, g_shotHealth);
+	float health = g_shotHealth;                                                              // 'fatal' by default: the body collapses at once
+	if (g_balance && !s.headGone && len(cv) <= g_balanceMaxSpeed) {                          // dying but not thrown: try to stay on its feet for a moment, like a euphoria ragdoll
+		const float r = (float)((c.QuadPart >> 3) & 1023) / 1023.0f, sec = g_balanceSeconds * (0.7f + 0.6f * r);
+		g_api->nm_set_task_param("NMShot_Standing", "*", "shotRelaxPeriod_Injured", sec);
+		health = g_balanceHealth; s.balancing = true;
+		if (s.verbose) Log("observe[%u]: trying to balance for about %.1f s", s.id, sec);
+	} else if (s.verbose && g_balance) Log("observe[%u]: no balancing (%s)", s.id, s.headGone ? "head is gone" : "thrown too hard");
+	g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, health);
 	s.last = c; s.frame = 0; s.phase = 2;
 	s.mode = (g_driveBodies && SetupDriveBodies(s)) ? 1 : 0;
+	if (!s.mode && s.hiddenMask && g_skipDismembered) { Log("observe[%u]: cut-off limb and the bodies cannot be driven, leaving the corpse to the game", s.id); return false; }
 	if (!s.mode) KeyframeGameBodies(s);
 	if (s.verbose) Log("observe[%u]: Delirium body started (pelvis %.2f m/s, chest %.2f m/s)", s.id, len(vel[0]), len(vel[10]));
 	return true;
@@ -427,7 +447,7 @@ static bool Step(Session& s) {
 		if (ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: actor is no longer dying or dead (life state %u), session over", s.id, ls); return false; }
 	}
 	if (ActorRoot(s.actor) != s.root) { if (s.verbose) Log("observe[%u]: actor or its 3D is gone, session over", s.id); return false; }
-	if (g_skipDismembered && (s.frame & 3) == 0) { int hid = HiddenLimb(s); if (hid >= 0) { Log("observe[%u]: a limb was cut off ('%s' scaled away), handing the corpse back to the game", s.id, g_rig.part[hid].ref.c_str()); return false; } }
+	if (s.mode != 1 && g_skipDismembered && (s.frame & 3) == 0) { int hid = HiddenLimb(s); if (hid >= 0) { Log("observe[%u]: a limb was cut off ('%s' scaled away), handing the corpse back to the game", s.id, g_rig.part[hid].ref.c_str()); return false; } }
 	if (s.frame > 5 && !s.cos.empty()) {                                                      // the game woke one of the bodies we keyframed (grabbing, an impulse): give the corpse back
 		LONG w = g_ww; if (w - s.wakeSeen > 32) s.wakeSeen = w - 32;
 		for (; s.wakeSeen < w; s.wakeSeen++) { uint32_t co = (uint32_t)g_wake[s.wakeSeen & 31]; for (uint32_t k : s.cos) if (k == co) { Log("observe[%u]: the game switched body %08X to a simulated motion type (grab or impulse), handing the corpse back", s.id, co); return false; } }
@@ -461,6 +481,11 @@ static bool Step(Session& s) {
 		g_api->nm_agent_step(s.agent, s.world, dt);
 		if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false;
 		if (s.mode == 1) {
+			if (s.balancing && !s.headGone && (s.frame & 3) == 0 && (HiddenMask(s) & HeadMask())) {   // the head was just shot off: no more balancing
+				s.headGone = true; s.balancing = false;
+				const float at[3] = { s.tr[70], s.tr[71], s.tr[72] }, dir[3] = { 0, 0, 0 }; g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, g_shotHealth);
+				Log("observe[%u]: head cut off, collapsing", s.id);
+			}
 			DriveBodies(s, s.tr);
 			if (s.frame >= 30 && s.driveErr > 220.0f) {                                              // Delirium and the game's bodies have parted ways (blocked, or the bodies are not following): the game carries on alone
 				Log("observe[%u]: the game's bodies are %.0f units from the target after %u frames, leaving the corpse to the game", s.id, s.driveErr, s.frame);
@@ -469,7 +494,8 @@ static bool Step(Session& s) {
 		} else if (g_drive) Drive(s, s.tr);
 		float fastest = 0;
 		for (int i = 0; i < 21; i++) { V3 np{ s.tr[i * 7], s.tr[i * 7 + 1], s.tr[i * 7 + 2] }, op{ s.prev[i * 3], s.prev[i * 3 + 1], s.prev[i * 3 + 2] }; fastest = std::max(fastest, len(np - op) / dt); s.prev[i * 3] = np.x; s.prev[i * 3 + 1] = np.y; s.prev[i * 3 + 2] = np.z; }
-		s.calm = (s.frame >= 90 && fastest < g_restSpeed) ? s.calm + 1 : 0;
+		const bool down = g_api->nm_agent_has_fallen(s.agent) != 0 || g_api->nm_agent_is_settled(s.agent) != 0;   // a body that is still balancing is not at rest
+		s.calm = (s.frame >= 90 && fastest < g_restSpeed && down) ? s.calm + 1 : 0;
 		if (s.verbose && (s.frame == 1 || s.frame % 60 == 0))
 		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, s.mode == 1 ? s.driveErr : dev);
 		  if (s.mode == 1) Log("observe[%u]   body drive: mean distance to the target %.1f units", s.id, s.driveErr);

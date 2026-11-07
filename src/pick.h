@@ -27,5 +27,6 @@ float GameFrameSeconds();
 // Sets a bhkBlendCollisionObject's motion type (4 = keyframed: the body follows its bone instead of simulating). Same call the game makes itself.
 bool GameSetMotionType(uint32_t collisionObject, int motionType);
 // Sets the Havok linear / angular velocity of a bhkRigidBody through its hkpMaxSizeMotion (FalloutNV 1.4.0.525). Vectors are Havok units per second (game units / 7).
-bool GameBodyOk(uint32_t bhkRigidBody);                                      // true if the object's vtable has the expected setters
+bool GameBodyOk(uint32_t bhkRigidBody);
+void GameBodyDescribe(uint32_t bhkRigidBody, char* out, size_t n);                                      // true if the object's vtable has the expected setters
 bool GameSetBodyVelocity(uint32_t bhkRigidBody, const float lin[3], const float ang[3]);

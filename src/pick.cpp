@@ -122,11 +122,18 @@ static bool CallVel(uint32_t fn, uint32_t body, const float* v) { ((VelFn)(uintp
 #endif
 // bhkRigidBody + 8 = hkpRigidBody, whose hkpMaxSizeMotion lives at +0xE0 (FalloutNV.exe 1.4.0.525). The motion's virtual slots 16 / 17 (0xC864B0 / 0xC864D0) store a vector at
 // motion+0xD0 / +0xE0: linear and angular velocity, in Havok units per second (game units / 7). (Slots 12 / 13 are setPosition / setRotation, so never pass those a velocity.)
+static bool IsMotionVtable(uint32_t vt) {            // hkpMotion and every subclass sharing its velocity setters (FalloutNV.exe): Motion, KeyframedRigid, MaxSize, Sphere, Box, ThinBox, Character
+	return vt == 0x10C59F4 || vt == 0x10C6BEC || vt == 0x10C6C64 || vt == 0x10C6D54 || vt == 0x10C6DC4 || vt == 0x10C6E34 || vt == 0x10C6EA4;
+}
 static bool MotionOf(uint32_t body, uint32_t& motion, uint32_t& fLin, uint32_t& fAng) {
 	uint32_t hkp = 0, vt = 0;
-	if (body < 0x10000 || !Rd(body + 8, &hkp, 4) || hkp < 0x10000 || !Rd(hkp + 0xE0, &vt, 4) || vt != 0x010C6C64) return false;
+	if (body < 0x10000 || !Rd(body + 8, &hkp, 4) || hkp < 0x10000 || !Rd(hkp + 0xE0, &vt, 4) || !IsMotionVtable(vt)) return false;
 	if (!Rd(vt + 4 * 16, &fLin, 4) || !Rd(vt + 4 * 17, &fAng, 4) || fLin != 0x00C864B0 || fAng != 0x00C864D0) return false;
 	motion = hkp + 0xE0; return true;
+}
+void GameBodyDescribe(uint32_t body, char* out, size_t n) {         // for the log when a body is refused
+	uint32_t hkp = 0, vt = 0, a = 0, b = 0; Rd(body + 8, &hkp, 4); if (hkp) Rd(hkp + 0xE0, &vt, 4); if (vt) { Rd(vt + 64, &a, 4); Rd(vt + 68, &b, 4); }
+	snprintf(out, n, "body %08X vt %08X hkp %08X motion vt %08X slot16 %08X slot17 %08X", body, [&] { uint32_t v = 0; Rd(body, &v, 4); return v; }(), hkp, vt, a, b);
 }
 bool GameBodyOk(uint32_t body) { uint32_t m, a, b; return MotionOf(body, m, a, b); }
 bool GameSetBodyVelocity(uint32_t body, const float lin[3], const float ang[3]) {

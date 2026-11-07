@@ -291,6 +291,10 @@ static bool SetupDriveBodies(Session& s) {
 		if (!Rd(node + 0x1C, &co, 4) || !co || !Rd(co, &vt, 4) || vt != 0x10C53DC || !Rd(co + 8, &target, 4) || target != node || !Rd(co + 0x10, &body, 4) || !GameBodyOk(body)) continue;
 		s.dbodies.push_back({ node, body });
 	}
+	if (s.dbodies.empty()) {                                                                     // say why, once
+		for (auto& kv : s.rotPart) { uint32_t co = 0, vt = 0, tg = 0, body = 0; if (!Rd(kv.first + 0x1C, &co, 4) || !co) { Log("observe[%u]: first body: node %08X has no collision object", s.id, kv.first); break; }
+			Rd(co, &vt, 4); Rd(co + 8, &tg, 4); Rd(co + 0x10, &body, 4); char d[200]; GameBodyDescribe(body, d, sizeof d); Log("observe[%u]: first body refused: co %08X vt %08X target %08X (node %08X); %s", s.id, co, vt, tg, kv.first, d); break; }
+	}
 	if (s.verbose) Log("observe[%u]: driving %u of the game's bodies by velocity", s.id, (unsigned)s.dbodies.size());
 	return s.dbodies.size() >= 10;
 }

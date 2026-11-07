@@ -69,7 +69,7 @@ struct Session {
 	V3 p0[21]{}; Q q0[21]{}; LARGE_INTEGER t0{}, last{};
 	NmWorld* world = nullptr; NmAgent* agent = nullptr;
 	unsigned frame = 0, calm = 0, hold = 0, redrives = 0, nWritten = 0, nPropagated = 0, lifeCheck = 0;
-	float tr[21 * 7]{}, prev[21 * 3]{};
+	float tr[21 * 7]{}, prev[21 * 3]{}, driveErr = 0;
 	std::map<uint32_t, V3> wrote;                               // game-world bone translation we last wrote
 	std::vector<uint32_t> cos; LONG wakeSeen = 0;
 	int mode = 0;                                               // 1 = the game's own bodies are driven by velocity; 0 = bones are written (old way)
@@ -313,7 +313,7 @@ static void DriveBodies(Session& s, const float* tr) {
 		V3 axis = sh > 1e-4f ? V3{ q.x / sh, q.y / sh, q.z / sh } : V3{ 0, 0, 0 }; V3 w = axis * (ang * g_driveGain / tau); float wl = len(w); if (wl > maxAng) w = w * (maxAng / wl);
 		const float lv[3] = { lin.x, lin.y, lin.z }, av[3] = { w.x, w.y, w.z }; GameSetBodyVelocity(d.body, lv, av);
 	}
-	s.nWritten = n; if (n) { float m = errSum / n; if (s.firstErr < 0) s.firstErr = m; s.prev[63] = m; }
+	s.nWritten = n; if (n) { float m = errSum / n; if (s.firstErr < 0) s.firstErr = m; s.driveErr = m; }
 }
 
 static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, float dt) {
@@ -453,8 +453,8 @@ static bool Step(Session& s) {
 		if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false;
 		if (s.mode == 1) {
 			DriveBodies(s, s.tr);
-			if (s.frame == 60 && s.prev[63] > 140.0f) {                                              // the bodies are not following (still animation driven?): go back to writing bones
-				Log("observe[%u]: the game's bodies did not follow (mean error %.0f units after 60 frames), falling back to writing bones", s.id, s.prev[63]);
+			if (s.frame == 60 && s.driveErr > 140.0f) {                                              // the bodies are not following (still animation driven?): go back to writing bones
+				Log("observe[%u]: the game's bodies did not follow (mean error %.0f units after 60 frames), falling back to writing bones", s.id, s.driveErr);
 				s.mode = 0; KeyframeGameBodies(s);
 			}
 		} else if (g_drive) Drive(s, s.tr);
@@ -462,8 +462,8 @@ static bool Step(Session& s) {
 		for (int i = 0; i < 21; i++) { V3 np{ s.tr[i * 7], s.tr[i * 7 + 1], s.tr[i * 7 + 2] }, op{ s.prev[i * 3], s.prev[i * 3 + 1], s.prev[i * 3 + 2] }; fastest = std::max(fastest, len(np - op) / dt); s.prev[i * 3] = np.x; s.prev[i * 3 + 1] = np.y; s.prev[i * 3 + 2] = np.z; }
 		s.calm = (s.frame >= 90 && fastest < g_restSpeed) ? s.calm + 1 : 0;
 		if (s.verbose && (s.frame == 1 || s.frame % 60 == 0))
-		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, s.mode == 1 ? s.prev[63] : dev);
-		  if (s.mode == 1) Log("observe[%u]   body drive: mean distance to the target %.1f units", s.id, s.prev[63]);
+		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, s.mode == 1 ? s.driveErr : dev);
+		  if (s.mode == 1) Log("observe[%u]   body drive: mean distance to the target %.1f units", s.id, s.driveErr);
 		  if (dev > 1.0f && s.mode == 0) { std::string nm; NodeName(worstN, nm); Log("observe[%u]   worst bone '%s' off by (%.1f %.1f %.1f)", s.id, nm.c_str(), worstD.x, worstD.y, worstD.z); } }
 		if (s.calm >= g_restFrames || s.frame >= (unsigned)(g_simSeconds * 60)) {
 			Free(&s);

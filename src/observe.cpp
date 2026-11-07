@@ -250,7 +250,7 @@ static void KeyframeGameBodies(Session& s) {
 
 // ---- discovery only: how does the game store a rigid body's position and velocity? Samples three game bodies on consecutive warm-up frames, while the game's own
 // ragdoll is still moving them, and logs which dwords change, next to the speed measured from the bones. Read-only.
-static bool g_probe = true;
+static bool g_probe = false;
 static void ProbeBodies(Session& s, const V3* p, LARGE_INTEGER c) {
 	if (!g_probe || s.id > 2) return;
 	static const char* names[3] = { "Bip01 Pelvis", "Bip01 Spine1", "Bip01 Head" };

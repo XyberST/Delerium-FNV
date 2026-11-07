@@ -1,3 +1,4 @@
+#include <cmath>
 #include "pick.h"
 #include "actor.h"
 #include "log.h"
@@ -119,15 +120,20 @@ static bool CallVel(uint32_t fn, uint32_t body, const float* v) { __try { ((VelF
 typedef void(__attribute__((thiscall)) * VelFn)(void*, const float*);
 static bool CallVel(uint32_t fn, uint32_t body, const float* v) { ((VelFn)(uintptr_t)fn)((void*)(uintptr_t)body, v); return true; }
 #endif
-bool GameBodyOk(uint32_t body) {
-	uint32_t vt = 0, a = 0, b = 0; if (body < 0x10000 || !Rd(body, &vt, 4) || vt < 0x1000000 || vt > 0x1300000 || !Rd(vt + 4 * 55, &a, 4) || !Rd(vt + 4 * 56, &b, 4)) return false;
-	return a == 0x00C8D170 && b == 0x00C8D1A0;
+// bhkRigidBody + 8 = hkpRigidBody, whose hkpMaxSizeMotion lives at +0xE0 (FalloutNV.exe 1.4.0.525). The motion's virtual slots 16 / 17 (0xC864B0 / 0xC864D0) store a vector at
+// motion+0xD0 / +0xE0: linear and angular velocity, in Havok units per second (game units / 7). (Slots 12 / 13 are setPosition / setRotation, so never pass those a velocity.)
+static bool MotionOf(uint32_t body, uint32_t& motion, uint32_t& fLin, uint32_t& fAng) {
+	uint32_t hkp = 0, vt = 0;
+	if (body < 0x10000 || !Rd(body + 8, &hkp, 4) || hkp < 0x10000 || !Rd(hkp + 0xE0, &vt, 4) || vt != 0x010C6C64) return false;
+	if (!Rd(vt + 4 * 16, &fLin, 4) || !Rd(vt + 4 * 17, &fAng, 4) || fLin != 0x00C864B0 || fAng != 0x00C864D0) return false;
+	motion = hkp + 0xE0; return true;
 }
+bool GameBodyOk(uint32_t body) { uint32_t m, a, b; return MotionOf(body, m, a, b); }
 bool GameSetBodyVelocity(uint32_t body, const float lin[3], const float ang[3]) {
-	if (!GameBodyOk(body)) return false;
-	uint32_t vt = 0, a = 0, b = 0; Rd(body, &vt, 4); Rd(vt + 4 * 55, &a, 4); Rd(vt + 4 * 56, &b, 4);
+	uint32_t m, a, b; if (!MotionOf(body, m, a, b)) return false;
 	alignas(16) float l[4] = { lin[0], lin[1], lin[2], 0 }, w[4] = { ang[0], ang[1], ang[2], 0 };
-	return CallVel(a, body, l) && CallVel(b, body, w);
+	for (int i = 0; i < 3; i++) if (!(std::fabs(l[i]) < 1000.0f) || !(std::fabs(w[i]) < 100.0f)) return false;    // never hand the engine a huge or NaN value
+	return CallVel(a, m, l) && CallVel(b, m, w);
 }
 bool GameSetMotionType(uint32_t co, int type) {
 	static bool checked, ok;

@@ -26,3 +26,6 @@ bool PickCast(const float from[3], const float to[3], uint32_t filter, bool& hit
 float GameFrameSeconds();
 // Sets a bhkBlendCollisionObject's motion type (4 = keyframed: the body follows its bone instead of simulating). Same call the game makes itself.
 bool GameSetMotionType(uint32_t collisionObject, int motionType);
+// bhkRigidBody virtual slots 55/56 (FalloutNV 1.4.0.525, 0xC8D170 / 0xC8D1A0): set the Havok linear / angular velocity of the body. Vectors are Havok units per second (game units / 7).
+bool GameBodyOk(uint32_t bhkRigidBody);                                      // true if the object's vtable has the expected setters
+bool GameSetBodyVelocity(uint32_t bhkRigidBody, const float lin[3], const float ang[3]);

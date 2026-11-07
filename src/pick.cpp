@@ -65,6 +65,7 @@ uint32_t PickFindWorld(uint32_t actor, uint32_t co, char* how, size_t howLen) {
 	if (g_forced && (!hkw || hkw == g_forcedHkw)) { snprintf(how, howLen, "world proven by a real hit"); return g_forced; }
 	if (hkw && hkw == g_cacheHkw && g_cacheWorld) { uint32_t b = 0; if (Rd(g_cacheWorld + 8, &b, 4) && b == hkw) { snprintf(how, howLen, "cached by hkpWorld %08X", hkw); return g_cacheWorld; } }   // one hkpWorld serves many cells
 	if (!hkw && cell == g_cacheCell && g_cacheWorld && LooksLikeWorld(g_cacheWorld)) { snprintf(how, howLen, "cached, cell %08X", cell); return g_cacheWorld; }
+	{ uint32_t gw = 0, b = 0; if (Rd(0x011CA0D8, &gw, 4) && LooksLikeWorld(gw) && (!hkw || (Rd(gw + 8, &b, 4) && b == hkw))) { g_cacheWorld = gw; g_cacheHkw = hkw; snprintf(how, howLen, "the game's world pointer 0x11CA0D8"); return gw; } }   // FalloutNV.exe: NiPointer<bhkWorld> set up at 0x541B80
 	uint32_t player = 0, pcell = 0; Rd(0x011DEA3C, &player, 4); if (player > 0x10000) Rd(player + 0x40, &pcell, 4);
 	unsigned r1 = 0, r2 = 0; uint32_t w = WalkCell(cell, hkw, how, howLen, r1, r2);
 	if (!w && pcell > 0x10000 && pcell != cell) { w = WalkCell(pcell, hkw, how, howLen, r1, r2); if (w) { size_t n = strlen(how); snprintf(how + n, howLen - n, " (player's cell)"); } }
@@ -110,6 +111,23 @@ float GameFrameSeconds() {
 	float sp = 0; if (!Rd(kTimeGlobalSeconds, &sp, 4) || !(sp > 0.0f && sp < 0.5f)) return 0;
 	double vm = 1.0; if (!CallVats(vm) || !(vm > 0.0 && vm <= 4.0)) vm = 1.0;
 	return sp * (float)vm;
+}
+#ifdef _MSC_VER
+typedef void(__thiscall* VelFn)(void*, const float*);
+static bool CallVel(uint32_t fn, uint32_t body, const float* v) { __try { ((VelFn)(uintptr_t)fn)((void*)(uintptr_t)body, v); return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
+#else
+typedef void(__attribute__((thiscall)) * VelFn)(void*, const float*);
+static bool CallVel(uint32_t fn, uint32_t body, const float* v) { ((VelFn)(uintptr_t)fn)((void*)(uintptr_t)body, v); return true; }
+#endif
+bool GameBodyOk(uint32_t body) {
+	uint32_t vt = 0, a = 0, b = 0; if (body < 0x10000 || !Rd(body, &vt, 4) || vt < 0x1000000 || vt > 0x1300000 || !Rd(vt + 4 * 55, &a, 4) || !Rd(vt + 4 * 56, &b, 4)) return false;
+	return a == 0x00C8D170 && b == 0x00C8D1A0;
+}
+bool GameSetBodyVelocity(uint32_t body, const float lin[3], const float ang[3]) {
+	if (!GameBodyOk(body)) return false;
+	uint32_t vt = 0, a = 0, b = 0; Rd(body, &vt, 4); Rd(vt + 4 * 55, &a, 4); Rd(vt + 4 * 56, &b, 4);
+	alignas(16) float l[4] = { lin[0], lin[1], lin[2], 0 }, w[4] = { ang[0], ang[1], ang[2], 0 };
+	return CallVel(a, body, l) && CallVel(b, body, w);
 }
 bool GameSetMotionType(uint32_t co, int type) {
 	static bool checked, ok;

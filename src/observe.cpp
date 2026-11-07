@@ -19,12 +19,14 @@ static const float kUnit = 0.0142875f;                        // metres per game
 static EngineApi* g_api; static NmBuild* g_fit; static Rig g_rig;
 static bool g_enabled, g_drive = true, g_requireDead = true;
 static int g_maxActors = 4; static float g_simSeconds = 8, g_holdSeconds = 300;
+static bool g_driveBodies = true; static float g_driveGain = 1.0f, g_driveMax = 12.0f;
 static bool g_worldCollision, g_calibrate, g_groundAuto, g_groundReady = true, g_release = true; static unsigned g_calibTries; static float g_restSpeed = 1.5f; static unsigned g_restFrames = 30; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
 static float g_velScale = 1.0f, g_shotHealth = 1.0f; static bool g_keyframe = true, g_skipDismembered = true;
 static int g_started;                                         // sessions begun this run (verbose logging for the first few only)
 
 void ObserveSetDrive(bool on) { g_drive = on; }
 void ObserveSetRequireDead(bool on) { g_requireDead = on; }
+void ObserveSetDriveBodies(bool on, float gain, float maxSpeed) { g_driveBodies = on; g_driveGain = gain; g_driveMax = maxSpeed; }
 void ObserveSetRelease(bool on, float restSpeed, unsigned restFrames) { g_release = on; g_restSpeed = restSpeed; g_restFrames = restFrames; }
 void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered) { g_keyframe = keyframeGameBodies; g_skipDismembered = skipDismembered; }
 void ObserveSetTuning(float velocityScale, float shotHealth) { g_velScale = std::max(0.0f, std::min(velocityScale, 4.0f)); g_shotHealth = std::max(0.1f, shotHealth); }
@@ -69,7 +71,9 @@ struct Session {
 	unsigned frame = 0, calm = 0, hold = 0, redrives = 0, nWritten = 0, nPropagated = 0, lifeCheck = 0;
 	float tr[21 * 7]{}, prev[21 * 3]{};
 	std::map<uint32_t, V3> wrote;                               // game-world bone translation we last wrote
-	std::vector<uint32_t> cos; LONG wakeSeen = 0;                // the game's collision objects we keyframed; wake calls already looked at
+	std::vector<uint32_t> cos; LONG wakeSeen = 0;
+	int mode = 0;                                               // 1 = the game's own bodies are driven by velocity; 0 = bones are written (old way)
+	struct DBody { uint32_t node, body; }; std::vector<DBody> dbodies; float firstErr = -1;                // the game's collision objects we keyframed; wake calls already looked at
 };
 static std::vector<Session*> g_active; static std::map<uint32_t, DWORD> g_recent;
 
@@ -271,6 +275,43 @@ static void ProbeBodies(Session& s, const V3* p, LARGE_INTEGER c) {
 	sid = s.id;
 }
 
+// ---- direct drive: Delirium's pose becomes velocities on the game's own (simulated) bodies. The game's solver then does collision, constraints, looting and grabbing itself.
+static bool TargetWorld(const Session& s, const V3* P, const Q* Qp, uint32_t n, WorldXform& w) {
+	auto ir = s.rotPart.find(n), ip = s.posPart.find(n); if (ir == s.rotPart.end() || ip == s.posPart.end()) return false;
+	const int rp = ir->second, pp = ip->second;
+	V3 joint = P[pp] + rot(Qp[pp], g_rig.part[pp].anchor);
+	float Rb[9]; toMat(norm(mul(Qp[rp], g_rig.part[rp].offset)), Rb);
+	w = WorldXform{}; mulMM(s.rootW.R, Rb, w.R);
+	V3 t = mulMV(s.rootW.R, joint * (s.rootW.S / kUnit)); w.T[0] = s.rootW.T[0] + t.x; w.T[1] = s.rootW.T[1] + t.y; w.T[2] = s.rootW.T[2] + t.z; return true;
+}
+static bool SetupDriveBodies(Session& s) {
+	s.dbodies.clear();
+	for (auto& kv : s.rotPart) {
+		uint32_t node = kv.first, co = 0, vt = 0, target = 0, body = 0;
+		if (!Rd(node + 0x1C, &co, 4) || !co || !Rd(co, &vt, 4) || vt != 0x10C53DC || !Rd(co + 8, &target, 4) || target != node || !Rd(co + 0x10, &body, 4) || !GameBodyOk(body)) continue;
+		s.dbodies.push_back({ node, body });
+	}
+	if (s.verbose) Log("observe[%u]: driving %u of the game's bodies by velocity", s.id, (unsigned)s.dbodies.size());
+	return s.dbodies.size() >= 10;
+}
+static void DriveBodies(Session& s, const float* tr) {
+	V3 P[21]; Q Qp[21];
+	for (int i = 0; i < 21; i++) { P[i] = { tr[i * 7], tr[i * 7 + 1], tr[i * 7 + 2] }; Qp[i] = norm({ tr[i * 7 + 3], tr[i * 7 + 4], tr[i * 7 + 5], tr[i * 7 + 6] }); }
+	const float tau = 0.04f, maxLin = g_driveMax / kUnit / 7.0f, maxAng = 25.0f;    // Havok units per second = game units per second / 7
+	float errSum = 0; unsigned n = 0;
+	for (auto& d : s.dbodies) {
+		WorldXform tw, now; if (!TargetWorld(s, P, Qp, d.node, tw) || !NodeWorld(d.node, now)) continue;
+		V3 e{ tw.T[0] - now.T[0], tw.T[1] - now.T[1], tw.T[2] - now.T[2] }; errSum += len(e); n++;
+		V3 lin = e * (g_driveGain / tau / 7.0f); float ll = len(lin); if (ll > maxLin) lin = lin * (maxLin / ll);
+		float Re[9]; for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) Re[r * 3 + c] = tw.R[r * 3] * now.R[c * 3] + tw.R[r * 3 + 1] * now.R[c * 3 + 1] + tw.R[r * 3 + 2] * now.R[c * 3 + 2];   // target * current^T
+		normaliseCols(Re); Q q = norm(fromMat(Re)); if (q.w < 0) { q = { -q.x, -q.y, -q.z, -q.w }; }
+		float sh = std::sqrt(std::max(0.0f, 1.0f - q.w * q.w)); float ang = 2.0f * std::atan2(sh, q.w);
+		V3 axis = sh > 1e-4f ? V3{ q.x / sh, q.y / sh, q.z / sh } : V3{ 0, 0, 0 }; V3 w = axis * (ang * g_driveGain / tau); float wl = len(w); if (wl > maxAng) w = w * (maxAng / wl);
+		const float lv[3] = { lin.x, lin.y, lin.z }, av[3] = { w.x, w.y, w.z }; GameSetBodyVelocity(d.body, lv, av);
+	}
+	s.nWritten = n; if (n) { float m = errSum / n; if (s.firstErr < 0) s.firstErr = m; s.prev[63] = m; }
+}
+
 static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, float dt) {
 	uint32_t ls = 0xFFFF; Rd(s.actor + 0x108, &ls, 4);                    // Actor::lifeState: 1 dying, 2 dead
 	if (s.verbose) Log("observe[%u]: actor %08X life state %u one frame after the burst", s.id, s.actor, ls);
@@ -310,7 +351,8 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	float at[3] = { chest.x, chest.y, chest.z }, dir[3] = { hs > 0.05f ? cv.x / hs : 0.0f, hs > 0.05f ? cv.y / hs : 1.0f, 0.0f };
 	g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, g_shotHealth);
 	s.last = c; s.frame = 0; s.phase = 2;
-	KeyframeGameBodies(s);
+	s.mode = (g_driveBodies && SetupDriveBodies(s)) ? 1 : 0;
+	if (!s.mode) KeyframeGameBodies(s);
 	if (s.verbose) Log("observe[%u]: Delirium body started (pelvis %.2f m/s, chest %.2f m/s)", s.id, len(vel[0]), len(vel[10]));
 	return true;
 }
@@ -405,15 +447,23 @@ static bool Step(Session& s) {
 		uint32_t worstN = 0; V3 worstD{ 0, 0, 0 }; float dev = (s.verbose && (s.frame == 1 || s.frame % 60 == 0)) ? Deviation(s, &worstN, &worstD) : 0;
 		g_api->nm_agent_step(s.agent, s.world, dt);
 		if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false;
-		if (g_drive) Drive(s, s.tr);
+		if (s.mode == 1) {
+			DriveBodies(s, s.tr);
+			if (s.frame == 60 && s.prev[63] > 140.0f) {                                              // the bodies are not following (still animation driven?): go back to writing bones
+				Log("observe[%u]: the game's bodies did not follow (mean error %.0f units after 60 frames), falling back to writing bones", s.id, s.prev[63]);
+				s.mode = 0; KeyframeGameBodies(s);
+			}
+		} else if (g_drive) Drive(s, s.tr);
 		float fastest = 0;
 		for (int i = 0; i < 21; i++) { V3 np{ s.tr[i * 7], s.tr[i * 7 + 1], s.tr[i * 7 + 2] }, op{ s.prev[i * 3], s.prev[i * 3 + 1], s.prev[i * 3 + 2] }; fastest = std::max(fastest, len(np - op) / dt); s.prev[i * 3] = np.x; s.prev[i * 3 + 1] = np.y; s.prev[i * 3 + 2] = np.z; }
 		s.calm = (s.frame >= 90 && fastest < g_restSpeed) ? s.calm + 1 : 0;
 		if (s.verbose && (s.frame == 1 || s.frame % 60 == 0))
-		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, dev);
-		  if (dev > 1.0f) { std::string nm; NodeName(worstN, nm); Log("observe[%u]   worst bone '%s' off by (%.1f %.1f %.1f)", s.id, nm.c_str(), worstD.x, worstD.y, worstD.z); } }
+		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, s.mode == 1 ? s.prev[63] : dev);
+		  if (s.mode == 1) Log("observe[%u]   body drive: mean distance to the target %.1f units", s.id, s.prev[63]);
+		  if (dev > 1.0f && s.mode == 0) { std::string nm; NodeName(worstN, nm); Log("observe[%u]   worst bone '%s' off by (%.1f %.1f %.1f)", s.id, nm.c_str(), worstD.x, worstD.y, worstD.z); } }
 		if (s.calm >= g_restFrames || s.frame >= (unsigned)(g_simSeconds * 60)) {
 			Free(&s);
+			if (s.mode == 1) { Log("observe[%u]: at rest after %u frames, the game's bodies carry on from here", s.id, s.frame); return false; }
 			if ((g_release || (g_probe && s.id <= 2)) && !s.cos.empty()) {                                    // hand the resting corpse to the game: its bodies become simulated again, so it can be grabbed and dragged like a vanilla one
 				int n = 0; g_ours = 1; for (uint32_t co : s.cos) if (GameSetMotionType(co, 1)) n++; g_ours = 0;
 				Log("observe[%u]: at rest after %u frames, released %d game bodies back to simulation", s.id, s.frame, n);

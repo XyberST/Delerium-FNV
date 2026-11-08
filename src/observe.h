@@ -33,3 +33,36 @@ void ObserveSetBalanceMore(float fallSeconds, int steps, float velocityScale, bo
 // HitLocationAware: the part of the body the kill hit is found from which part the game kicked hardest (at least minKick m/s relative to the rest) and given to the engine's shot reaction.
 // The multipliers scale how long a body hit there keeps fighting (0 = collapses at once).
 void ObserveSetHitLocation(bool on, float minKick, float head, float torso, float pelvis, float leg, float arm);
+
+// Everything below is read from DeliriumFNV.ini and can be changed live (ReloadKey).
+struct ExtraCfg {
+	// drive: how the game's own bodies are pulled toward Delirium's pose
+	float driveTau = 0.06f;              // time constant of the pull, seconds (bigger = softer)
+	float driveSoftAbove = 60.0f;        // mean distance (game units) above which the pull is softened
+	float driveMaxCatchUp = 50.0f;       // never ask a body to close more than this many units at once
+	float driveMaxAngular = 10.0f;       // rad/s
+	float driveGiveUpDistance = 220.0f;  // mean distance at which the corpse is left to the game
+	float driveGiveUpSeconds = 0.5f;     // ... but not before this much simulated time
+	// timing
+	float restSeconds = 0.5f;            // calm for this long (after the body has fallen) = at rest
+	float restMinSeconds = 1.5f;         // never earlier than this
+	float hiddenScale = 0.2f;            // a bone scaled below this fraction counts as cut off
+	// performance
+	float simRate = 60.0f;               // engine steps per second at most (0 = every frame)
+	float maxDistance = 4000.0f;         // game units; corpses farther from the player are left to the game (0 = no limit)
+	float minFps = 25.0f;                // below this frame rate new corpses are left to the game (0 = off)
+	bool profile = true;                 // log what each corpse cost
+	// reactions
+	bool burn = true, shock = true, explosion = true, gutCurl = true, fall = true, dumpNodes = true, burnByDamageTicks = true;
+	float burnBalanceSeconds = 1.2f, burnFlailSeconds = 4.0f; int dotTicks = 3; float dotWindow = 6.0f;
+	float shockBalanceSeconds = 0.6f, shockSeconds = 2.5f;
+	float explosionSeconds = 1.6f, explosionRollChance = 0.3f, explosionWritheChance = 0.3f;
+	float gutCurlChance = 0.6f, gutCurlSeconds = 2.5f;
+	float fallMinHeight = 100.0f, fallCatchChance = 0.5f;
+	float flailStiffness = 12.0f, flailAmplitude = 1.3f, flailPeriod = 0.8f;
+	char burnKeywords[96] = "";           // node-name fragments (comma separated) that mark a burning actor; empty = off until DumpNodes has shown what the game attaches
+	char shockKeywords[96] = "";          // same, for an electrocuted actor
+};
+void ObserveSetExtra(const ExtraCfg& c);
+// ReloadKey: virtual-key code; pressing it while the game is in front calls fn (0 = no hot key).
+void ObserveSetReloadHook(void (*fn)(), int vk);

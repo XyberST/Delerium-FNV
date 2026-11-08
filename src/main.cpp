@@ -41,26 +41,9 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
 	return TRUE;
 }
 
-extern "C" {
-__declspec(dllexport) bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInfo* info) {
-	info->infoVersion = NVSE_INFO_VERSION; info->name = "DeliriumFNV"; info->version = 1;
-	if (nvse->isEditor) return false;
-	return nvse->runtimeVersion == RUNTIME_VERSION_1_4_0_525;      // every address in this plugin is for 1.4.0.525
-}
-__declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
-	PickLogDir();
-	LogOpen((g_logDir + "\\DeliriumFNV.log").c_str());
-	Log("DeliriumFNV 0.13.1 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
-	IngameInit(const_cast<NVSEInterface*>(nvse));
-	std::string ini = g_pluginDir + "\\DeliriumFNV.ini";
-	if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) ini = g_root + "\\DeliriumFNV.ini";   // also accept the ini beside the dll
-	if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) { Log("DeliriumFNV.ini not found, plugin disabled"); return true; }
-	if (!GetPrivateProfileIntA("General", "Enabled", 1, ini.c_str())) { Log("disabled in the ini"); return true; }
-
-	bool engineOk = EngineLoad(g_engine, g_pluginDir) && EngineBuildFit(g_engine, g_pluginDir);
-	if (engineOk && GetPrivateProfileIntA("General", "SmokeTest", 0, ini.c_str())) EngineSmokeTest(g_engine, g_pluginDir);
-	if (!engineOk) { IngameNotify("DeliriumFNV: engine failed to load, see the log"); return true; }
-
+static std::string g_iniPath;
+static void ReloadSettings();
+static void ApplyIni(const std::string& ini) {
 	ObserveSetDrive(GetPrivateProfileIntA("General", "Drive", 1, ini.c_str()) != 0);
 	ObserveSetRequireDead(GetPrivateProfileIntA("General", "RequireDead", 1, ini.c_str()) != 0);
 	char b[32]; GetPrivateProfileStringA("General", "SimSeconds", "8", b, sizeof b, ini.c_str()); float sim = (float)atof(b);
@@ -78,6 +61,66 @@ __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	{ char v[32], hp[32]; GetPrivateProfileStringA("General", "VelocityScale", "1.0", v, sizeof v, ini.c_str()); GetPrivateProfileStringA("General", "ShotHealth", "1.0", hp, sizeof hp, ini.c_str()); ObserveSetTuning((float)atof(v), (float)atof(hp)); }
 	{ char f[32]; GetPrivateProfileStringA("World", "GroundFilter", "auto", f, sizeof f, ini.c_str()); char c[32]; GetPrivateProfileStringA("World", "GroundCell", "0.35", c, sizeof c, ini.c_str());
 	  ObserveSetWorld(GetPrivateProfileIntA("World", "Collision", 1, ini.c_str()) != 0, GetPrivateProfileIntA("World", "Calibrate", 0, ini.c_str()) != 0, (uint32_t)strtoul(f, nullptr, 0), (float)atof(c), GetPrivateProfileIntA("World", "GroundHalf", 10, ini.c_str())); }
+
+	// ---- everything else: drive tuning, timing, performance, reactions
+	{
+		ExtraCfg x;
+		auto F = [&](const char* sec, const char* key, float d) { char def[32], v[32]; snprintf(def, sizeof def, "%g", d); GetPrivateProfileStringA(sec, key, def, v, sizeof v, ini.c_str()); return (float)atof(v); };
+		auto I = [&](const char* sec, const char* key, int d) { return (int)GetPrivateProfileIntA(sec, key, d, ini.c_str()); };
+		auto B = [&](const char* sec, const char* key, bool d) { return GetPrivateProfileIntA(sec, key, d ? 1 : 0, ini.c_str()) != 0; };
+		x.driveTau = F("Drive", "Tau", x.driveTau); x.driveSoftAbove = F("Drive", "SoftAbove", x.driveSoftAbove); x.driveMaxCatchUp = F("Drive", "MaxCatchUp", x.driveMaxCatchUp);
+		x.driveMaxAngular = F("Drive", "MaxAngular", x.driveMaxAngular); x.driveGiveUpDistance = F("Drive", "GiveUpDistance", x.driveGiveUpDistance); x.driveGiveUpSeconds = F("Drive", "GiveUpSeconds", x.driveGiveUpSeconds);
+		x.restSeconds = F("Timing", "RestSeconds", x.restSeconds); x.restMinSeconds = F("Timing", "RestMinSeconds", x.restMinSeconds); x.hiddenScale = F("Timing", "HiddenScale", x.hiddenScale);
+		x.simRate = F("Performance", "SimRate", x.simRate); x.maxDistance = F("Performance", "MaxDistance", x.maxDistance); x.minFps = F("Performance", "MinFps", x.minFps); x.profile = B("Performance", "Profile", x.profile);
+		x.burn = B("Reactions", "Burn", x.burn); x.burnByDamageTicks = B("Reactions", "BurnByDamageTicks", x.burnByDamageTicks); x.dotTicks = I("Reactions", "DamageTicks", x.dotTicks); x.dotWindow = F("Reactions", "DamageWindow", x.dotWindow);
+		x.burnBalanceSeconds = F("Reactions", "BurnBalanceSeconds", x.burnBalanceSeconds); x.burnFlailSeconds = F("Reactions", "BurnFlailSeconds", x.burnFlailSeconds);
+		{ char kw[96]; GetPrivateProfileStringA("Reactions", "BurnKeywords", "", kw, sizeof kw, ini.c_str()); strcpy_s(x.burnKeywords, sizeof x.burnKeywords, kw); }
+		x.shock = B("Reactions", "Shock", x.shock); x.shockBalanceSeconds = F("Reactions", "ShockBalanceSeconds", x.shockBalanceSeconds); x.shockSeconds = F("Reactions", "ShockSeconds", x.shockSeconds);
+		{ char kw[96]; GetPrivateProfileStringA("Reactions", "ShockKeywords", "", kw, sizeof kw, ini.c_str()); strcpy_s(x.shockKeywords, sizeof x.shockKeywords, kw); }
+		x.dumpNodes = B("Reactions", "DumpNodes", x.dumpNodes);
+		x.explosion = B("Reactions", "Explosion", x.explosion); x.explosionSeconds = F("Reactions", "ExplosionSeconds", x.explosionSeconds);
+		x.explosionRollChance = F("Reactions", "ExplosionRollChance", x.explosionRollChance); x.explosionWritheChance = F("Reactions", "ExplosionWritheChance", x.explosionWritheChance);
+		x.gutCurl = B("Reactions", "GutCurl", x.gutCurl); x.gutCurlChance = F("Reactions", "GutCurlChance", x.gutCurlChance); x.gutCurlSeconds = F("Reactions", "GutCurlSeconds", x.gutCurlSeconds);
+		x.fall = B("Reactions", "Fall", x.fall); x.fallMinHeight = F("Reactions", "FallMinHeight", x.fallMinHeight); x.fallCatchChance = F("Reactions", "FallCatchChance", x.fallCatchChance);
+		x.flailStiffness = F("Reactions", "FlailStiffness", x.flailStiffness); x.flailAmplitude = F("Reactions", "FlailAmplitude", x.flailAmplitude); x.flailPeriod = F("Reactions", "FlailPeriod", x.flailPeriod);
+		ObserveSetExtra(x);
+		{ char rk[16]; GetPrivateProfileStringA("General", "ReloadKey", "0x79", rk, sizeof rk, ini.c_str()); ObserveSetReloadHook(&ReloadSettings, (int)strtoul(rk, nullptr, 0)); }      // F10 by default (0x79), 0 = off
+	}
+	// ---- [EngineParams]: any engine task parameter, as Task.parameter=value (for example NMShot_Standing.shotBodyStiffness=14)
+	{
+		char buf[16384]; DWORD n = GetPrivateProfileSectionA("EngineParams", buf, sizeof buf, ini.c_str()); int applied = 0;
+		for (char* p = buf; n && *p; p += strlen(p) + 1) {
+			std::string line = p; size_t eq = line.find('='), dot = line.find('.'); if (eq == std::string::npos || dot == std::string::npos || dot > eq) continue;
+			std::string task = line.substr(0, dot), param = line.substr(dot + 1, eq - dot - 1), val = line.substr(eq + 1);
+			if (g_engine.nm_set_task_param && g_engine.nm_set_task_param(task.c_str(), "*", param.c_str(), (float)atof(val.c_str())) == 0) applied++;
+			else Log("EngineParams: could not set %s", line.c_str());
+		}
+		if (applied) Log("EngineParams: %d engine parameters applied", applied);
+	}
+}
+static void ReloadSettings() { if (g_iniPath.empty()) return; ApplyIni(g_iniPath); Log("settings reloaded from %s", g_iniPath.c_str()); IngameNotify("DeliriumFNV: settings reloaded"); }
+
+extern "C" {
+__declspec(dllexport) bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInfo* info) {
+	info->infoVersion = NVSE_INFO_VERSION; info->name = "DeliriumFNV"; info->version = 1;
+	if (nvse->isEditor) return false;
+	return nvse->runtimeVersion == RUNTIME_VERSION_1_4_0_525;      // every address in this plugin is for 1.4.0.525
+}
+__declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
+	PickLogDir();
+	LogOpen((g_logDir + "\\DeliriumFNV.log").c_str());
+	Log("DeliriumFNV 0.14 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
+	IngameInit(const_cast<NVSEInterface*>(nvse));
+	std::string ini = g_pluginDir + "\\DeliriumFNV.ini";
+	if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) ini = g_root + "\\DeliriumFNV.ini";   // also accept the ini beside the dll
+	if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) { Log("DeliriumFNV.ini not found, plugin disabled"); return true; }
+	if (!GetPrivateProfileIntA("General", "Enabled", 1, ini.c_str())) { Log("disabled in the ini"); return true; }
+
+	bool engineOk = EngineLoad(g_engine, g_pluginDir) && EngineBuildFit(g_engine, g_pluginDir);
+	if (engineOk && GetPrivateProfileIntA("General", "SmokeTest", 0, ini.c_str())) EngineSmokeTest(g_engine, g_pluginDir);
+	if (!engineOk) { IngameNotify("DeliriumFNV: engine failed to load, see the log"); return true; }
+
+	g_iniPath = ini; ApplyIni(ini);
 	ObserveInit(&g_engine, EngineFittedBuild(), g_pluginDir.c_str());
 	int n = ProbesInstall(ini.c_str());
 	Log("%d hooks installed", n);

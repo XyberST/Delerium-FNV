@@ -30,3 +30,6 @@ void ObserveSetDriveBodies(bool on, float gain, float maxSpeed, float angularGai
 void ObserveSetBalance(bool on, float health, float seconds, float maxSpeed, bool dismemberedOk);
 // BalanceFallSeconds: how long the body takes to go limp once its strength runs out; BalanceSteps: how many stumbling steps it may take; BalanceVelocityScale: how much of the kill's motion a balancing body inherits; push: use the engine's standard shot push.
 void ObserveSetBalanceMore(float fallSeconds, int steps, float velocityScale, bool push);
+// HitLocationAware: the part of the body the kill hit is found from which part the game kicked hardest (at least minKick m/s relative to the rest) and given to the engine's shot reaction.
+// The multipliers scale how long a body hit there keeps fighting (0 = collapses at once).
+void ObserveSetHitLocation(bool on, float minKick, float head, float torso, float pelvis, float leg, float arm);

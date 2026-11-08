@@ -20,6 +20,7 @@ static EngineApi* g_api; static NmBuild* g_fit; static Rig g_rig;
 static bool g_enabled, g_drive = true, g_requireDead = true;
 static int g_maxActors = 4; static float g_simSeconds = 8, g_holdSeconds = 300;
 static bool g_balance = true, g_dismemberedOk = true; static float g_balanceHealth = 120.0f, g_balanceSeconds = 2.0f, g_balanceMaxSpeed = 6.0f, g_balanceFall = 1.0f, g_balanceVelScale = 0.5f; static int g_balanceSteps = 8; static bool g_balancePush = true;
+static bool g_hitLoc = true; static float g_hitMin = 1.0f, g_mulHead = 0.0f, g_mulTorso = 1.0f, g_mulPelvis = 0.8f, g_mulLeg = 0.4f, g_mulArm = 1.3f;
 static bool g_driveBodies = true; static float g_driveGain = 1.0f, g_driveMax = 8.0f, g_driveAngGain = 0.4f;
 static bool g_worldCollision, g_calibrate, g_groundAuto, g_groundReady = true, g_release = true; static unsigned g_calibTries; static float g_restSpeed = 1.5f; static unsigned g_restFrames = 30; static uint32_t g_groundFilter = 0x011F0025; static float g_groundCell = 0.35f; static int g_groundHalf = 10;
 static float g_velScale = 1.0f, g_shotHealth = 1.0f; static bool g_keyframe = true, g_skipDismembered = true;
@@ -30,6 +31,7 @@ void ObserveSetRequireDead(bool on) { g_requireDead = on; }
 void ObserveSetDriveBodies(bool on, float gain, float maxSpeed, float angGain) { g_driveBodies = on; g_driveGain = gain; g_driveMax = maxSpeed; g_driveAngGain = angGain; }
 void ObserveSetBalance(bool on, float health, float seconds, float maxSpeed, bool dismemberedOk) { g_balance = on; g_balanceHealth = health; g_balanceSeconds = seconds; g_balanceMaxSpeed = maxSpeed; g_dismemberedOk = dismemberedOk; }
 void ObserveSetBalanceMore(float fallSeconds, int steps, float velocityScale, bool push) { g_balanceFall = fallSeconds; g_balanceSteps = steps; g_balanceVelScale = velocityScale; g_balancePush = push; }
+void ObserveSetHitLocation(bool on, float minKick, float head, float torso, float pelvis, float leg, float arm) { g_hitLoc = on; g_hitMin = minKick; g_mulHead = head; g_mulTorso = torso; g_mulPelvis = pelvis; g_mulLeg = leg; g_mulArm = arm; }
 void ObserveSetRelease(bool on, float restSpeed, unsigned restFrames) { g_release = on; g_restSpeed = restSpeed; g_restFrames = restFrames; }
 void ObserveSetBodies(bool keyframeGameBodies, bool skipDismembered) { g_keyframe = keyframeGameBodies; g_skipDismembered = skipDismembered; }
 void ObserveSetTuning(float velocityScale, float shotHealth) { g_velScale = std::max(0.0f, std::min(velocityScale, 4.0f)); g_shotHealth = std::max(0.1f, shotHealth); }
@@ -340,16 +342,32 @@ static void StopDrive(Session& s) {
 	for (auto& d : s.dbodies) GameSetBodyVelocity(d.body, z, z);
 }
 
+static float RegionMul(int part) {                                  // how long a hit here lets the body keep fighting, relative to a torso hit (rig parts: 0 pelvis, 1-6 legs, 7-10 spine, 11-12 neck/head, 13-20 arms)
+	if (part == 11 || part == 12) return g_mulHead;
+	if (part >= 1 && part <= 6) return g_mulLeg;
+	if (part >= 13) return g_mulArm;
+	if (part == 0) return g_mulPelvis;
+	return g_mulTorso;
+}
+static const char* PartName(int part) {
+	static const char* n[21] = { "pelvis", "left thigh", "left shin", "left foot", "right thigh", "right shin", "right foot", "lower spine", "spine", "upper spine", "chest", "neck", "head", "left clavicle", "left upper arm", "left forearm", "left hand", "right clavicle", "right upper arm", "right forearm", "right hand" };
+	return part >= 0 && part < 21 ? n[part] : "?";
+}
 static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, float dt) {
 	uint32_t ls = 0xFFFF; Rd(s.actor + 0x108, &ls, 4);                    // Actor::lifeState: 1 dying, 2 dead
 	if (s.verbose) Log("observe[%u]: actor %08X life state %u one frame after the burst", s.id, s.actor, ls);
 	if (g_requireDead && ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: not dying or dead, leaving it to the game", s.id); return false; }
 	float st[21 * 13], zp[21 * 7]; V3 vel[21];
-	const float chestSpeed = len(p[10] - s.p0[10]) * g_velScale / dt;                           // how hard the kill threw the chest
-	const bool willBalance = g_balance && !s.headGone && chestSpeed <= g_balanceMaxSpeed;
-	const float vs = g_velScale * (willBalance ? g_balanceVelScale : 1.0f);                       // a body that is meant to stay up inherits less of the kill's motion
+	V3 rv[21], vMean{ 0, 0, 0 };                                                              // the motion the game's own ragdoll gave each part in its first frames
+	for (int i = 0; i < 21; i++) { rv[i] = (p[i] - s.p0[i]) * (g_velScale / dt); vMean = vMean + rv[i] * (1.0f / 21.0f); }
+	int hitPart = 10; V3 hitDir{ 0, 0, 0 }; bool located = false;                              // the kill impulse lands on the part that was hit, so that part moves most relative to the rest
+	if (g_hitLoc) { float best = 0; for (int i = 0; i < 21; i++) { V3 d = rv[i] - vMean; float l = len(d); if (l > best) { best = l; hitPart = i; hitDir = d; } } located = best >= g_hitMin; if (!located) { hitPart = 10; hitDir = { 0, 0, 0 }; } }
+	const float chestSpeed = len(rv[10]);
+	const float regionMul = located ? RegionMul(hitPart) : 1.0f;
+	const bool willBalance = g_balance && !s.headGone && chestSpeed <= g_balanceMaxSpeed && regionMul > 0.0f;
+	const float bf = willBalance ? g_balanceVelScale : 1.0f, vs = g_velScale * bf;                       // a body that is meant to stay up inherits less of the kill's motion
 	for (int i = 0; i < 21; i++) {
-		vel[i] = (p[i] - s.p0[i]) * (vs / dt);
+		vel[i] = rv[i] * bf;
 		Q dq = mul(q[i], conj(s.q0[i])); if (dq.w < 0) dq = { -dq.x, -dq.y, -dq.z, -dq.w };
 		float w = std::min(1.0f, dq.w), ang = 2 * std::acos(w), sn = std::sqrt(std::max(0.0f, 1 - w * w));
 		V3 av = sn > 1e-5f ? V3{ dq.x / sn, dq.y / sn, dq.z / sn } * (ang * vs / dt) : V3{ 0, 0, 0 };
@@ -380,16 +398,21 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	g_api->nm_agent_set_part_states(s.agent, st, 21); g_api->nm_agent_set_zero_pose(s.agent, zp, 21);
 	V3 chest = p[10], cv = vel[10]; float hs = std::sqrt(cv.x * cv.x + cv.y * cv.y);
 	float at[3] = { chest.x, chest.y, chest.z }, dir[3] = { hs > 0.05f ? cv.x / hs : 0.0f, hs > 0.05f ? cv.y / hs : 1.0f, 0.0f };
+	if (located) {                                                                                // aim the engine's shot reaction at the part that was really hit, from the direction it was kicked
+		at[0] = p[hitPart].x; at[1] = p[hitPart].y; at[2] = p[hitPart].z;
+		const float hl = len(hitDir); if (hl > 0.05f) { dir[0] = hitDir.x / hl; dir[1] = hitDir.y / hl; dir[2] = hitDir.z / hl; }
+		if (s.verbose) Log("observe[%u]: hit location: %s (part %d), kicked %.1f m/s relative to the rest", s.id, PartName(hitPart), hitPart, len(hitDir));
+	} else if (s.verbose && g_hitLoc) Log("observe[%u]: hit location unclear, treating it as a chest hit", s.id);
 	float health = g_shotHealth;                                                              // 'fatal' by default: the body collapses at once
 	if (willBalance) {                                                                         // dying but not thrown: stay on its feet and stumble for a moment, then give up
 		const float r = (float)((c.QuadPart >> 3) & 1023) / 1023.0f;
-		s.balanceFor = g_balanceSeconds * (0.7f + 0.6f * r); s.balanceT = 0; s.relaxed = false;
+		s.balanceFor = g_balanceSeconds * (0.7f + 0.6f * r) * regionMul; s.balanceT = 0; s.relaxed = false;
 		g_api->nm_set_task_param("NMShot_Standing", "*", "shotMaxSteps", (float)g_balanceSteps);
 		health = g_balanceHealth; s.balancing = true;                                             // 100 or more keeps the body upright until we tell it to relax
 		if (!g_balancePush) { dir[0] = dir[1] = dir[2] = 0.0f; }
 		if (s.verbose) Log("observe[%u]: balancing for about %.1f s (chest speed %.1f m/s)", s.id, s.balanceFor, chestSpeed);
-	} else if (s.verbose && g_balance) Log("observe[%u]: no balancing (%s, chest speed %.1f m/s)", s.id, s.headGone ? "head is gone" : "thrown too hard", chestSpeed);
-	g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, health);
+	} else if (s.verbose && g_balance) Log("observe[%u]: no balancing (%s, chest speed %.1f m/s)", s.id, s.headGone ? "head is gone" : (regionMul <= 0.0f ? "hit in the head" : "thrown too hard"), chestSpeed);
+	g_api->nm_agent_task_shot(s.agent, s.world, nullptr, hitPart, at, dir, health);
 	s.last = c; s.frame = 0; s.phase = 2;
 	s.mode = (g_driveBodies && SetupDriveBodies(s)) ? 1 : 0;
 	if (!s.mode && s.hiddenMask && g_skipDismembered) { Log("observe[%u]: cut-off limb and the bodies cannot be driven, leaving the corpse to the game", s.id); return false; }

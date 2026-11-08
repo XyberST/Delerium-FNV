@@ -511,7 +511,7 @@ static bool Step(Session& s) {
 		} else if (g_drive) Drive(s, s.tr);
 		float fastest = 0;
 		for (int i = 0; i < 21; i++) { V3 np{ s.tr[i * 7], s.tr[i * 7 + 1], s.tr[i * 7 + 2] }, op{ s.prev[i * 3], s.prev[i * 3 + 1], s.prev[i * 3 + 2] }; fastest = std::max(fastest, len(np - op) / dt); s.prev[i * 3] = np.x; s.prev[i * 3 + 1] = np.y; s.prev[i * 3 + 2] = np.z; }
-		const bool down = g_api->nm_agent_has_fallen(s.agent) != 0 || g_api->nm_agent_is_settled(s.agent) != 0;   // a body that is still balancing is not at rest
+		const bool down = (g_api->nm_agent_has_fallen(s.agent) != 0 || g_api->nm_agent_is_settled(s.agent) != 0) && (!s.balancing || s.relaxed);   // a body that is still balancing (and has not run out of strength) is not at rest, however still it stands
 		s.calm = (s.frame >= 90 && fastest < g_restSpeed && down) ? s.calm + 1 : 0;
 		if (s.verbose && (s.frame == 1 || s.frame % 60 == 0))
 		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, s.mode == 1 ? s.driveErr : dev);

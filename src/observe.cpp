@@ -241,6 +241,8 @@ static void Begin(uint32_t actor) {
 	if (!s->root || !NodeWorld(s->root, s->rootW)) { if (s->verbose) Log("observe[%u]: cannot read the actor's 3D", s->id); delete s; return; }
 	if (!g_rig.ok || !g_api || !g_fit) { delete s; return; }
 	auto bones = CollectBones(s->root);
+	{ uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl == actor) { int nb = 0; for (auto& kv : bones) { uint32_t co = 0, vt = 0, tg = 0; if (Rd(kv.second + 0x1C, &co, 4) && co && Rd(co, &vt, 4) && vt == 0x10C53DC && Rd(co + 8, &tg, 4) && tg == kv.second) nb++; }
+		Log("observe[%u]: player skeleton has %d collision bodies", s->id, nb); if (nb < 17) { Log("observe[%u]: the player has no ragdoll bodies, left to the game", s->id); delete s; return; } } }
 	if (!g_burnKw.empty() || !g_shockKw.empty() || g_x.dumpNodes) {                           // look for what is attached to a burning / shocked actor
 		std::string dump; int shown = 0;
 		for (auto& kv : bones) {
@@ -712,7 +714,7 @@ static void PlayerWatch() {
 	}
 	if (!deathTick) return;
 	const DWORD dt = now - deathTick;
-	if (!forced && g_x.playerDeath && dt > 300) {
+	if (!forced && g_x.playerDeath && g_x.playerFallback && dt > 300) {
 		forced = true;
 		if (g_recent.find(pl) == g_recent.end()) { Log("player: no kill burst was seen, starting Delirium from the life state"); Begin(pl); }
 	}

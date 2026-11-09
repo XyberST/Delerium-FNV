@@ -53,6 +53,8 @@ struct ExtraCfg {
 	float minFps = 25.0f;                // below this frame rate new corpses are left to the game (0 = off)
 	bool profile = true;                 // log what each corpse cost
 	bool playerFallback = false;         // start the player from the life state when no kill burst was seen (experimental: the game may be tearing the body down)
+	bool knockAgony = true, knockOutAgony = true;   // a knocked-down actor keeps writhing, pedalling and curling on the floor until the game gets it up (knocked out too, unless KnockOutAgony=0)
+	float knockAgonySeconds = 3.0f, knockAgonyPause = 0.5f;   // length of one writhing spell, limp pause between spells
 	bool knockdown = true;               // living actors knocked down by the game (explosion blast, knocked out) get Delirium until the game starts getting them up
 	bool playerDeath = false;             // the player's own death ragdoll gets Delirium too (needs the PlayerCharacter[206] slot probe)
 	// reactions

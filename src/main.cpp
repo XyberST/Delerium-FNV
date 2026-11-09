@@ -80,7 +80,7 @@ static void ApplyIni(const std::string& ini) {
 		x.dumpNodes = B("Reactions", "DumpNodes", x.dumpNodes);
 		x.explosion = B("Reactions", "Explosion", x.explosion); x.explosionSeconds = F("Reactions", "ExplosionSeconds", x.explosionSeconds);
 		x.explosionRollChance = F("Reactions", "ExplosionRollChance", x.explosionRollChance); x.explosionWritheChance = F("Reactions", "ExplosionWritheChance", x.explosionWritheChance);
-		x.playerDeath = B("Reactions", "PlayerDeath", x.playerDeath); x.knockdown = B("Reactions", "Knockdown", x.knockdown); x.playerFallback = B("Reactions", "PlayerFallback", x.playerFallback);
+		x.playerDeath = B("Reactions", "PlayerDeath", x.playerDeath); x.knockdown = B("Reactions", "Knockdown", x.knockdown); x.knockAgony = B("Reactions", "KnockAgony", x.knockAgony); x.knockOutAgony = B("Reactions", "KnockOutAgony", x.knockOutAgony); x.knockAgonySeconds = F("Reactions", "KnockAgonySeconds", x.knockAgonySeconds); x.knockAgonyPause = F("Reactions", "KnockAgonyPause", x.knockAgonyPause); x.playerFallback = B("Reactions", "PlayerFallback", x.playerFallback);
 		x.gutCurl = B("Reactions", "GutCurl", x.gutCurl); x.gutCurlChance = F("Reactions", "GutCurlChance", x.gutCurlChance); x.gutCurlSeconds = F("Reactions", "GutCurlSeconds", x.gutCurlSeconds);
 		x.fall = B("Reactions", "Fall", x.fall); x.fallMinHeight = F("Reactions", "FallMinHeight", x.fallMinHeight); x.fallCatchChance = F("Reactions", "FallCatchChance", x.fallCatchChance);
 		x.flailStiffness = F("Reactions", "FlailStiffness", x.flailStiffness); x.flailAmplitude = F("Reactions", "FlailAmplitude", x.flailAmplitude); x.flailPeriod = F("Reactions", "FlailPeriod", x.flailPeriod);
@@ -110,7 +110,7 @@ __declspec(dllexport) bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInf
 __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	PickLogDir();
 	LogOpen((g_logDir + "\\DeliriumFNV.log").c_str());
-	Log("DeliriumFNV 0.16 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
+	Log("DeliriumFNV 0.17 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
 	IngameInit(const_cast<NVSEInterface*>(nvse));
 	std::string ini = g_pluginDir + "\\DeliriumFNV.ini";
 	if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) ini = g_root + "\\DeliriumFNV.ini";   // also accept the ini beside the dll

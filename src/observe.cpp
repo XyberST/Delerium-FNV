@@ -403,7 +403,7 @@ static const char* PartName(int part) {
 	return part >= 0 && part < 21 ? n[part] : "?";
 }
 // ---- scripted reactions on top of the engine's shot behaviour: flailing, curling, bracing (all parameters from the ini)
-enum { A_WINDMILL_ON = 1, A_WRITHE_FULL, A_WRITHE_UPPER, A_PEDAL_ON, A_CURL_ON, A_ROLLUP_ON, A_EXPLOSION, A_HIGHFALL_ON, A_CATCHFALL_ON, A_STOP_ALL };
+enum { A_WINDMILL_ON = 1, A_WRITHE_FULL, A_WRITHE_UPPER, A_PEDAL_ON, A_CURL_ON, A_ROLLUP_ON, A_EXPLOSION, A_HIGHFALL_ON, A_CATCHFALL_ON, A_STOP_ALL, A_AGONY_NEXT };
 static float Rnd01() { static unsigned seed = GetTickCount() * 2654435761u; seed = seed * 1664525u + 1013904223u; return (float)(seed >> 8) / 16777216.0f; }
 struct MsgB {                                                                                  // one engine message: begin, parameters, send
 	Session& s; MsgB(Session& s_, const char* n) : s(s_) { g_api->nm_msg_begin(s.agent, n); }
@@ -412,6 +412,15 @@ struct MsgB {                                                                   
 	MsgB& t(const char* k, const char* v) { g_api->nm_msg_set_string(s.agent, k, v); return *this; }
 	void send() { g_api->nm_msg_send(s.agent, s.world); }
 };
+// A knocked-down actor keeps fumbling on the floor until the game gets it up: cycles of writhing, pedalling and curling with short limp pauses.
+static void ScheduleAgony(Session& s) {
+	const float t = s.rt, len = std::max(1.5f, g_x.knockAgonySeconds * (0.7f + 0.6f * Rnd01())), r = Rnd01();
+	s.tl.push_back({ t, A_STOP_ALL, 0 });
+	if (r < 0.4f) { s.tl.push_back({ t + 0.05f, A_WRITHE_FULL, 0 }); s.tl.push_back({ t + 0.05f, A_PEDAL_ON, 0 }); }
+	else if (r < 0.7f) { s.tl.push_back({ t + 0.05f, A_ROLLUP_ON, 0 }); s.tl.push_back({ t + 0.05f, A_PEDAL_ON, 0 }); }
+	else { s.tl.push_back({ t + 0.05f, A_CURL_ON, 0 }); s.tl.push_back({ t + len * 0.5f, A_STOP_ALL, 0 }); s.tl.push_back({ t + len * 0.5f + 0.05f, A_WRITHE_UPPER, 0 }); s.tl.push_back({ t + len * 0.5f + 0.05f, A_PEDAL_ON, 0 }); }
+	s.tl.push_back({ t + len, A_STOP_ALL, 0 }); s.tl.push_back({ t + len + g_x.knockAgonyPause * (0.6f + 0.8f * Rnd01()), A_AGONY_NEXT, 0 });
+}
 static void DoAct(Session& s, int a, float v) {
 	(void)v; const float K = g_x.flailStiffness, A = g_x.flailAmplitude, P = g_x.flailPeriod;
 	switch (a) {
@@ -432,6 +441,7 @@ static void DoAct(Session& s, int a, float v) {
 	case A_HIGHFALL_ON: MsgB(s, "highFall").b("start", true).f("bodyStiffness", K * 0.85f).f("armAmplitude", A).f("armPeriod", P * 0.6f).send(); break;
 	case A_CATCHFALL_ON: MsgB(s, "stopAllBehaviours").send(); g_api->nm_agent_task_catch_fall(s.agent, nullptr); break;
 	case A_STOP_ALL: MsgB(s, "stopAllBehaviours").send(); break;
+	case A_AGONY_NEXT: ScheduleAgony(s); break;
 	}
 }
 
@@ -526,6 +536,7 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 		if (s.verbose) Log("observe[%u]: balancing for about %.1f s (chest speed %.1f m/s)", s.id, s.balanceFor, chestSpeed);
 	} else if (s.verbose && g_balance) Log("observe[%u]: no balancing (%s, chest speed %.1f m/s)", s.id, s.headGone ? "head is gone" : (s.legGone ? "a leg is cut off" : (regionMul <= 0.0f ? "hit in the head" : "thrown too hard")), chestSpeed);
 	if (!skipShot) g_api->nm_agent_task_shot(s.agent, s.world, nullptr, hitPart, at, dir, health);
+	if (s.knock && g_x.knockAgony && (s.knockState != 3 || g_x.knockOutAgony)) { float lastT = 0; for (const auto& e : s.tl) lastT = std::max(lastT, e.t); s.tl.push_back({ s.tl.empty() ? 1.0f : lastT + 0.15f, A_AGONY_NEXT, 0 }); if (s.verbose) Log("observe[%u]: will keep fumbling on the floor until the game gets it up", s.id); }
 	s.last = c; s.frame = 0; s.phase = 2;
 	s.mode = (g_driveBodies && SetupDriveBodies(s)) ? 1 : 0;
 	if (!s.mode && s.hiddenMask && g_skipDismembered) { Log("observe[%u]: cut-off limb and the bodies cannot be driven, leaving the corpse to the game", s.id); return false; }
@@ -672,7 +683,8 @@ static bool Step(Session& s) {
 		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, s.mode == 1 ? s.driveErr : dev);
 		  if (s.mode == 1) Log("observe[%u]   body drive: mean distance to the target %.1f units", s.id, s.driveErr);
 		  if (dev > 1.0f && s.mode == 0) { std::string nm; NodeName(worstN, nm); Log("observe[%u]   worst bone '%s' off by (%.1f %.1f %.1f)", s.id, nm.c_str(), worstD.x, worstD.y, worstD.z); } }
-		if (s.calmT >= g_x.restSeconds || s.simTime >= g_simSeconds) {
+		const bool agony = s.knock && g_x.knockAgony && (s.knockState != 3 || g_x.knockOutAgony);
+		if (agony ? s.simTime >= 60.0f : (s.calmT >= g_x.restSeconds || s.simTime >= g_simSeconds)) {
 			Free(&s);
 			if (s.mode == 1) { StopDrive(s); Log("observe[%u]: at rest after %u frames, the game's bodies carry on from here", s.id, s.frame); return false; }
 			if ((g_release || (g_probe && s.id <= 2)) && !s.cos.empty()) {                                    // hand the resting corpse to the game: its bodies become simulated again, so it can be grabbed and dragged like a vanilla one

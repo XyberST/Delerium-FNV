@@ -81,6 +81,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 
 // ---- sessions ----
 struct Session {
+	bool knock = false; int knockState = 0;                      // a living actor knocked down (game knock state 1 explode, 3 knocked out), not a corpse
 	int phase = 0;                                              // 1 pose sampled, 2 simulating, 3 holding the final pose
 	uint32_t actor = 0, root = 0, vt0 = 0, refId = 0; WorldXform rootW{}; bool verbose = false; unsigned id = 0;
 	uint32_t bone[21]{}, boneA[21]{}, boneB[21]{};
@@ -102,7 +103,7 @@ struct Session {
 	int mode = 0;                                               // 1 = the game's own bodies are driven by velocity; 0 = bones are written (old way)
 	struct DBody { uint32_t node, body; }; std::vector<DBody> dbodies; float firstErr = -1;                // the game's collision objects we keyframed; wake calls already looked at
 };
-static std::vector<Session*> g_active; static std::map<uint32_t, DWORD> g_recent;
+static std::vector<Session*> g_active; static std::map<uint32_t, DWORD> g_recent, g_recentKnock;
 
 static bool BoneRoot(const Session& s, uint32_t node, V3& pos, Q& rq) {      // metres and rotation in the actor's root frame
 	WorldXform w; if (!NodeWorld(node, w)) return false;
@@ -220,22 +221,24 @@ static int HiddenLimb(const Session& s) {                        // index of a r
 	return -1;
 }
 
-static void Begin(uint32_t actor) {
+static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	const double b0 = NowMs();
 	DWORD now = GetTickCount();
 	for (Session* a : g_active) if (a->actor == actor) return;
-	auto rc = g_recent.find(actor); if (rc != g_recent.end() && now - rc->second < 90000) return;         // dying then dead fire two bursts
+	std::map<uint32_t, DWORD>& rmap = knock ? g_recentKnock : g_recent;
+	auto rc = rmap.find(actor); if (rc != rmap.end() && now - rc->second < (knock ? 3000u : 90000u)) return;         // dying then dead fire two bursts
 	int sim = 0; for (Session* a : g_active) if (a->phase < 3) sim++;
 	if (sim >= g_maxActors) return;                                                        // only bodies still being simulated count against the limit
 	if (g_x.maxDistance > 0) {                                                             // far corpses are not worth the cost: the game's own ragdoll will do
 		uint32_t pl = 0; float ap[3], pp[3];
-		if (Rd(0x011DEA3C, &pl, 4) && pl && Rd(actor + 0x30, ap, 12) && Rd(pl + 0x30, pp, 12)) { const float dx = ap[0] - pp[0], dy = ap[1] - pp[1], dz = ap[2] - pp[2]; if (dx * dx + dy * dy + dz * dz > g_x.maxDistance * g_x.maxDistance) { g_recent[actor] = now; return; } }
+		if (Rd(0x011DEA3C, &pl, 4) && pl && Rd(actor + 0x30, ap, 12) && Rd(pl + 0x30, pp, 12)) { const float dx = ap[0] - pp[0], dy = ap[1] - pp[1], dz = ap[2] - pp[2]; if (dx * dx + dy * dy + dz * dz > g_x.maxDistance * g_x.maxDistance) { rmap[actor] = now; return; } }
 	}
-	if (g_x.minFps > 0 && g_fps > 0 && g_fps < g_x.minFps) { g_recent[actor] = now; static int said = 0; if (said++ < 5) Log("observe: frame rate %.0f is below MinFps %.0f, corpse left to the game", g_fps, g_x.minFps); return; }
+	if (g_x.minFps > 0 && g_fps > 0 && g_fps < g_x.minFps) { rmap[actor] = now; static int said = 0; if (said++ < 5) Log("observe: frame rate %.0f is below MinFps %.0f, corpse left to the game", g_fps, g_x.minFps); return; }
 	if (g_active.size() >= 24) for (size_t i = 0; i < g_active.size(); i++) if (g_active[i]->phase == 3) { Free(g_active[i]); delete g_active[i]; g_active.erase(g_active.begin() + i); break; }   // drop the oldest held pose
-	g_recent[actor] = now;
-	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->verbose = s->id <= 4;
-	if (s->verbose) Log("observe[%u]: death burst, actor %08X", s->id, actor);
+	rmap[actor] = now;
+	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->knock = knock; s->knockState = knockState; s->verbose = s->id <= 4;
+	if (knock) { static int kn = 0; s->verbose = kn++ < 6; }
+	if (s->verbose) { if (knock) Log("observe[%u]: knockdown (game knock state %d), actor %08X", s->id, knockState, actor); else Log("observe[%u]: death burst, actor %08X", s->id, actor); }
 	{ uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl == actor) { s->verbose = true; uint8_t tp = 0; uint32_t fp = 0; Rd(actor + 0x64A, &tp, 1); Rd(actor + 0x68C, &fp, 4); Log("observe[%u]: this is the player (third-person flag %u, first-person node %08X)", s->id, (unsigned)tp, fp); } }
 	s->root = ActorRoot(actor); Rd(actor, &s->vt0, 4); Rd(actor + 0xC, &s->refId, 4);   // identity, to notice the memory being reused by another actor
 	if (!s->root || !NodeWorld(s->root, s->rootW)) { if (s->verbose) Log("observe[%u]: cannot read the actor's 3D", s->id); delete s; return; }
@@ -435,7 +438,7 @@ static void DoAct(Session& s, int a, float v) {
 static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, float dt) {
 	uint32_t ls = 0xFFFF; Rd(s.actor + 0x108, &ls, 4);                    // Actor::lifeState: 1 dying, 2 dead
 	if (s.verbose) Log("observe[%u]: actor %08X life state %u one frame after the burst", s.id, s.actor, ls);
-	if (g_requireDead && ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: not dying or dead, leaving it to the game", s.id); return false; }
+	if (g_requireDead && !s.knock && ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: not dying or dead, leaving it to the game", s.id); return false; }
 	float st[21 * 13], zp[21 * 7]; V3 vel[21];
 	V3 rv[21], vMean{ 0, 0, 0 };                                                              // the motion the game's own ragdoll gave each part in its first frames
 	for (int i = 0; i < 21; i++) { rv[i] = (p[i] - s.p0[i]) * (g_velScale / dt); vMean = vMean + rv[i] * (1.0f / 21.0f); }
@@ -443,7 +446,7 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	if (g_hitLoc) { float best = 0; for (int i = 0; i < 21; i++) { V3 d = rv[i] - vMean; float l = len(d); if (l > best) { best = l; hitPart = i; hitDir = d; } } located = best >= g_hitMin; if (!located) { hitPart = 10; hitDir = { 0, 0, 0 }; } }
 	const float chestSpeed = len(rv[10]);
 	const float regionMul = located ? RegionMul(hitPart) : 1.0f;
-	const bool willBalance = g_balance && !s.headGone && !s.legGone && chestSpeed <= g_balanceMaxSpeed && regionMul > 0.0f;
+	const bool willBalance = !s.knock && g_balance && !s.headGone && !s.legGone && chestSpeed <= g_balanceMaxSpeed && regionMul > 0.0f;
 	const float bf = willBalance ? g_balanceVelScale : 1.0f, vs = g_velScale * bf;                       // a body that is meant to stay up inherits less of the kill's motion
 	for (int i = 0; i < 21; i++) {
 		vel[i] = rv[i] * bf;
@@ -487,7 +490,7 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	const bool airborne = g_x.fall && s.floorDrop > 0.0f && !s.headGone;                          // shot in the air, or thrown off a ledge
 	const bool burning = !airborne && g_x.burn && willBalance && (s.nodeBurn || (g_x.burnByDamageTicks && s.dotCount >= g_x.dotTicks && chestSpeed < 2.0f));
 	const bool shocked = !airborne && !burning && g_x.shock && willBalance && s.nodeShock;
-	const bool thrown = !airborne && !burning && !shocked && g_x.explosion && !s.headGone && regionMul > 0.0f && chestSpeed > g_balanceMaxSpeed;
+	const bool thrown = !airborne && !burning && !shocked && g_x.explosion && !s.headGone && (s.knock ? s.knockState == 1 : (regionMul > 0.0f && chestSpeed > g_balanceMaxSpeed));
 	const bool gut = g_x.gutCurl && located && (hitPart == 0 || hitPart == 7 || hitPart == 8) && Rnd01() < g_x.gutCurlChance;
 	s.kind = airborne ? 4 : burning ? 1 : shocked ? 2 : thrown ? 3 : 0;
 	bool skipShot = false;
@@ -583,7 +586,15 @@ static bool NodesStillValid(const Session& s) {                  // a freed or r
 static bool Step(Session& s) {
 	uint32_t vt = 0, rid = 0;
 	if (!Rd(s.actor, &vt, 4) || vt != s.vt0 || !Rd(s.actor + 0xC, &rid, 4) || rid != s.refId) { if (s.verbose) Log("observe[%u]: the actor's memory now holds something else, session over", s.id); return false; }
-	if (++s.lifeCheck % 15 == 0 && g_requireDead) {                                          // revived, reloaded or replaced by a living actor: stop touching it
+	if (s.knock && ++s.lifeCheck % 4 == 0) {                                                  // a knocked-down actor: hand it back as soon as the game starts getting it up
+		uint32_t ls = 0xFFFF; Rd(s.actor + 0x108, &ls, 4);
+		if (ls == 1 || ls == 2) { s.knock = false; if (s.verbose) Log("observe[%u]: the knocked-down actor died, carrying on as a death", s.id); }
+		else {
+			uint32_t pr = 0; uint8_t ks = 0xFF; Rd(s.actor + 0x68, &pr, 4); if (pr) Rd(pr + 0x13C, &ks, 1);
+			if (ls != 0 || ks < 1 || ks > 4) { Log("observe[%u]: knockdown over (knock state %d, life state %u), the game takes the body back", s.id, (int)(signed char)ks, ls); if (s.mode == 1) StopDrive(s); return false; }
+		}
+	}
+	if (!s.knock && ++s.lifeCheck % 15 == 0 && g_requireDead) {                              // revived, reloaded or replaced by a living actor: stop touching it
 		uint32_t ls = 0xFFFF; Rd(s.actor + 0x108, &ls, 4);
 		if (ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: actor is no longer dying or dead (life state %u), session over", s.id, ls); return false; }
 	}
@@ -681,7 +692,8 @@ static bool Step(Session& s) {
 	return true;
 }
 
-void ObserveReset() {                                          // save load, new game, exit to menu: every actor pointer we hold becomes invalid
+void ObserveReset() {
+	g_recentKnock.clear();                                          // save load, new game, exit to menu: every actor pointer we hold becomes invalid
 	for (Session* s : g_active) { Free(s); delete s; }
 	if (!g_active.empty()) Log("observe: game state changed, released %u sessions", (unsigned)g_active.size());
 	g_active.clear(); g_recent.clear(); g_qr = g_qw; g_lastQ = 0; g_lastDmgActor = 0;
@@ -697,6 +709,23 @@ static void PollReloadKey() {
 	const bool down = pid == GetCurrentProcessId() && (GetAsyncKeyState(g_reloadVk) & 0x8000) != 0;   // only while the game is the front window
 	if (down && !wasDown) g_reloadFn();
 	wasDown = down;
+}
+
+
+// Living actors knocked down (explosion, power attack, knockdown chance): the process keeps a knock state byte (+0x13C): 1 explode, 3 knocked out.
+// Candidates are the actors the damage hook has seen lately; their process is polled each frame.
+static void KnockWatch() {
+	if (!g_x.knockdown) return;
+	const DWORD now = GetTickCount(); LONG top = g_dmgN; uint32_t seen[64]; int ns = 0;
+	for (LONG i = top > 64 ? top - 64 : 0; i < top; i++) {
+		if (now - (DWORD)g_dmgTick[i & 63] > 6000) continue;
+		const uint32_t a = (uint32_t)g_dmgActor[i & 63]; bool dup = false; for (int k = 0; k < ns; k++) if (seen[k] == a) { dup = true; break; }
+		if (dup || ns >= 64) continue; seen[ns++] = a;
+		uint32_t vt = 0, ls = 0xFFFF, pr = 0; if (!Rd(a, &vt, 4) || vt != 0x1086A6C || !Rd(a + 0x108, &ls, 4) || ls != 0 || !Rd(a + 0x68, &pr, 4) || pr < 0x10000) continue;
+		uint8_t ks = 0; if (!Rd(pr + 0x13C, &ks, 1) || (ks != 1 && ks != 3)) continue;
+		bool busy = false; for (Session* s : g_active) if (s->actor == a) { busy = true; break; }
+		if (!busy) Begin(a, true, (int)ks);
+	}
 }
 
 // The player: log what the game does when the player dies, and start Delirium from the life state when no kill burst was seen.
@@ -736,7 +765,8 @@ void ObserveTick() {
 	const double t0 = NowMs();
 	{ static double last = 0; if (last > 0) { const double d = t0 - last; if (d > 0.1 && d < 1000.0) { const float inst = (float)(1000.0 / d); g_fps = g_fps <= 0 ? inst : g_fps * 0.97f + inst * 0.03f; } } last = t0; }
 	PollReloadKey();
-	PlayerWatch();
+	if (g_x.playerDeath) PlayerWatch();
+	KnockWatch();
 	while (g_qr != g_qw) { uint32_t a = (uint32_t)g_q[g_qr & 15]; g_qr++; Begin(a); }
 	for (size_t i = 0; i < g_active.size();) {
 		const double s0 = NowMs(); const bool keep = Step(*g_active[i]); const double c = NowMs() - s0;

@@ -235,6 +235,18 @@ static int HiddenLimb(const Session& s) {                        // index of a r
 	return -1;
 }
 
+
+// Length of the left leg (thigh to calf) in game units: the yardstick for how big an actor is; the player's own skeleton is the human reference.
+static float LegLength(uint32_t actor) {
+	const uint32_t root = ActorRoot(actor); if (!root) return -1.0f;
+	auto b = CollectBones(root); auto t = b.find("Bip01 L Thigh"), c = b.find("Bip01 L Calf"); if (t == b.end() || c == b.end()) return -1.0f;
+	WorldXform a, d; if (!NodeWorld(t->second, a) || !NodeWorld(c->second, d)) return -1.0f;
+	const float dx = a.T[0] - d.T[0], dy = a.T[1] - d.T[1], dz = a.T[2] - d.T[2]; return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+static float BodyRatio(uint32_t actor) {
+	static float base = -1.0f; if (base <= 0) { uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl) base = LegLength(pl); }
+	if (base <= 0) return -1.0f; const float l = LegLength(actor); return l > 0 ? l / base : -1.0f;
+}
 static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	const double b0 = NowMs();
 	DWORD now = GetTickCount();
@@ -243,6 +255,7 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	if (ls0 == 3 && !g_x.unconscious) return;
 	if (uncon) { knock = true; knockState = 3; }
 	std::map<uint32_t, DWORD>& rmap = knock ? g_recentKnock : g_recent;
+	{ uint32_t avt = 0; Rd(actor, &avt, 4); if (avt == 0x10870AC && !g_x.creatures) return; }
 	auto rc = rmap.find(actor); if (rc != rmap.end() && now - rc->second < (knock ? 3000u : 90000u)) return;         // dying then dead fire two bursts
 	int sim = 0; for (Session* a : g_active) if (a->phase < 3) sim++;
 	if (sim >= g_maxActors) return;                                                        // only bodies still being simulated count against the limit
@@ -275,11 +288,27 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 		for (size_t i = 0; i < dump.size(); i += 200) Log("observe[%u]: other nodes: %s", s->id, dump.substr(i, 200).c_str());
 	}
 	s->dotCount = DamageTicks(actor, (DWORD)(g_x.dotWindow * 1000.0f));
-	auto find = [&](const std::string& n) -> uint32_t { auto it = bones.find(n); return it == bones.end() ? 0 : it->second; };
+	uint32_t cvt = 0; Rd(actor, &cvt, 4); const bool isCreature = cvt == 0x10870AC;
+	// Creatures like feral ghouls have fewer spine bones: a missing one is replaced by the nearest bone of the chain (the first part to claim a bone keeps it).
+	auto find = [&](const std::string& n) -> uint32_t {
+		auto it = bones.find(n); if (it != bones.end()) return it->second;
+		if (!isCreature) return 0;
+		const char* alt[4] = { nullptr, nullptr, nullptr, nullptr };
+		if (n == "Bip01 Spine2") { alt[0] = "Bip01 Spine1"; alt[1] = "Bip01 Spine"; }
+		else if (n == "Bip01 Spine1") { alt[0] = "Bip01 Spine"; }
+		else if (n == "Bip01 Neck1") { alt[0] = "Bip01 Neck"; alt[1] = "Bip01 Spine2"; alt[2] = "Bip01 Spine1"; alt[3] = "Bip01 Spine"; }
+		else if (n == "Bip01 Neck") { alt[0] = "Bip01 Neck1"; alt[1] = "Bip01 Spine2"; alt[2] = "Bip01 Spine1"; alt[3] = "Bip01 Spine"; }
+		for (const char* a : alt) if (a) { auto j = bones.find(a); if (j != bones.end()) { static int sub = 0; if (sub++ < 12) Log("observe[%u]: creature %08X has no '%s', using '%s'", s->id, actor, n.c_str(), a); return j->second; } }
+		return 0;
+	};
 	for (int i = 0; i < 21; i++) {
 		s->bone[i] = find(g_rig.part[i].ref); s->boneA[i] = find(g_rig.part[i].jointA); s->boneB[i] = find(g_rig.part[i].jointB);
 		if (!s->bone[i] || !s->boneA[i] || !s->boneB[i]) { uint32_t vt = 0; Rd(actor, &vt, 4); static int nh = 0; if (nh++ < 8) Log("observe[%u]: bone '%s' not found on actor %08X (class %s): no humanoid skeleton, left to the game", s->id, g_rig.part[i].ref.c_str(), actor, vt == 0x10870AC ? "creature" : vt == 0x1086A6C ? "character" : "other"); delete s; return; }
 	}
+	{ const float ratio = BodyRatio(actor); static int said3 = 0;
+	  if (ratio > 0) {
+		if (said3++ < 40) Log("observe[%u]: actor %08X is %.2f times the player's leg length (%s)", s->id, actor, ratio, cvt == 0x10870AC ? "creature" : "character");
+		if (!g_x.largeActors && ratio > g_x.largeScale) { Log("observe[%u]: actor %08X is large (%.2f), left to the game (LargeActors=0)", s->id, actor, ratio); delete s; return; } } }
 	if (g_skipDismembered) {                                                                // a cut-off limb is hidden by scaling its bone to nothing; only those actors are left to the game
 		s->hiddenMask = HiddenMask(*s); s->headGone = (s->hiddenMask & HeadMask()) != 0; s->legGone = (s->hiddenMask & LegMask()) != 0;
 		int hid = HiddenLimb(*s);
@@ -288,7 +317,7 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	}
 	for (int i = 0; i < 21; i++) {
 		if (!g_rig.part[i].write) continue;
-		uint32_t n = s->bone[i]; s->rotPart[n] = i; int pp = i;
+		uint32_t n = s->bone[i]; if (s->rotPart.count(n)) continue; s->rotPart[n] = i; int pp = i;
 		for (int j = 0; j < 21; j++) if (g_rig.part[j].ref == g_rig.part[i].ref && g_rig.part[j].jointA == g_rig.part[j].jointB) { pp = j; break; }
 		s->posPart[n] = pp; s->order.push_back(n);
 	}
@@ -766,19 +795,37 @@ static void PollReloadKey() {
 }
 
 
-// Living actors knocked down (explosion, power attack, knockdown chance): the process keeps a knock state byte (+0x13C): 1 explode, 3 knocked out.
-// Candidates are the actors the damage hook has seen lately; their process is polled each frame.
+// The game's list of actors it simulates at high detail: ProcessLists (static, 0x11E0E80), its array of actor pointers at +8 with, per detail level,
+// the end index at +0x24 (level 0 starts at 0) and the start index of the next level at +0x18.
+static int ProcessActors(uint32_t* out, int cap) {
+	const uint32_t X = 0x11E0E84; uint32_t arr = 0, c0 = 0, s1 = 0, c1 = 0;
+	if (!Rd(X + 4, &arr, 4) || !arr || !Rd(X + 0x20, &c0, 4) || !Rd(X + 0x14, &s1, 4) || !Rd(X + 0x24, &c1, 4)) return 0;
+	int n = 0;
+	auto take = [&](uint32_t from, uint32_t to) { for (uint32_t i = from; i < to && i < 400 && n < cap; i++) { uint32_t a = 0; if (Rd(arr + i * 4, &a, 4) && a) out[n++] = a; } };
+	if (c0 < 400) take(0, c0);
+	if (c1 < 400 && s1 <= c1) take(s1, c1);
+	return n;
+}
+
+// Living actors knocked down (explosion, power attack, push): the process keeps a knock state byte (+0x13C): 1 explode, 3 knocked out. Actors that go
+// unconscious (life state 3) are caught when their life state changes. Every few frames the game's actor list is scanned.
 static void KnockWatch() {
-	if (!g_x.knockdown) return;
-	const DWORD now = GetTickCount(); LONG top = g_dmgN; uint32_t seen[64]; int ns = 0;
-	for (LONG i = top > 64 ? top - 64 : 0; i < top; i++) {
-		if (now - (DWORD)g_dmgTick[i & 63] > 6000) continue;
-		const uint32_t a = (uint32_t)g_dmgActor[i & 63]; bool dup = false; for (int k = 0; k < ns; k++) if (seen[k] == a) { dup = true; break; }
-		if (dup || ns >= 64) continue; seen[ns++] = a;
-		uint32_t vt = 0, ls = 0xFFFF, pr = 0; if (!Rd(a, &vt, 4) || (vt != 0x1086A6C && vt != 0x10870AC) || !Rd(a + 0x108, &ls, 4) || (ls != 0 && ls != 3) || !Rd(a + 0x68, &pr, 4) || pr < 0x10000) continue;
-		uint8_t ks = 0; if (ls == 3) { if (!g_x.unconscious) continue; ks = 3; } else if (!Rd(pr + 0x13C, &ks, 1) || (ks != 1 && ks != 3)) continue;
+	if (!g_x.knockdown && !g_x.unconscious) return;
+	static unsigned tick = 0; if (++tick % 6) return;
+	static std::map<uint32_t, uint32_t> lastLs; static int said = 0;
+	uint32_t list[256]; const int n = ProcessActors(list, 256);
+	if (said < 3 && n > 0) { said++; Log("observe: scanning %d actors from the game's actor list", n); }
+	if (lastLs.size() > 800) lastLs.clear();
+	for (int k = 0; k < n; k++) {
+		const uint32_t a = list[k]; uint32_t vt = 0, ls = 0xFFFF, pr = 0;
+		if (!Rd(a, &vt, 4) || (vt != 0x1086A6C && vt != 0x10870AC) || !Rd(a + 0x108, &ls, 4)) continue;
+		auto it = lastLs.find(a); const uint32_t prev = it == lastLs.end() ? 0xFFFE : it->second; lastLs[a] = ls;
 		bool busy = false; for (Session* s : g_active) if (s->actor == a) { busy = true; break; }
-		if (!busy) Begin(a, true, (int)ks);
+		if (busy) continue;
+		if (ls == 3) { if (g_x.unconscious && prev != 3 && prev != 0xFFFE) Begin(a, true, 3); continue; }     // went unconscious just now (not one found lying there)
+		if (ls != 0 || !g_x.knockdown || !Rd(a + 0x68, &pr, 4) || pr < 0x10000) continue;
+		uint8_t ks = 0; if (!Rd(pr + 0x13C, &ks, 1) || (ks != 1 && ks != 3)) continue;
+		Begin(a, true, (int)ks);
 	}
 }
 

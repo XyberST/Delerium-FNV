@@ -55,6 +55,9 @@ struct ExtraCfg {
 	bool playerFallback = false;         // start the player from the life state when no kill burst was seen (experimental: the game may be tearing the body down)
 	bool knockAgony = true, knockOutAgony = true;   // a knocked-down actor keeps writhing, pedalling and curling on the floor until the game gets it up (knocked out too, unless KnockOutAgony=0)
 	float knockAgonySeconds = 3.0f, knockAgonyPause = 0.5f;   // length of one writhing spell, limp pause between spells
+	bool creatures = true;               // actors of the Creature class (ghouls, mutants, ...) may get Delirium
+	bool largeActors = false;            // actors much bigger than a human (super mutants) may get Delirium: the rig was made for a human skeleton
+	float largeScale = 1.2f;             // leg bone length relative to the player's above which an actor counts as large
 	bool unconscious = true;             // actors the game has knocked unconscious (life state 3) get Delirium like knocked-out ones
 	float unconsciousAgonySeconds = 6.0f; // how long an unconscious actor keeps writhing before it lies limp and is handed back
 	bool stagger = true;                 // a shot actor staggers away from whoever shot it (direction taken from the attacker's position)

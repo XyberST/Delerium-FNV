@@ -55,6 +55,14 @@ struct ExtraCfg {
 	bool playerFallback = false;         // start the player from the life state when no kill burst was seen (experimental: the game may be tearing the body down)
 	bool knockAgony = true, knockOutAgony = true;   // a knocked-down actor keeps writhing, pedalling and curling on the floor until the game gets it up (knocked out too, unless KnockOutAgony=0)
 	float knockAgonySeconds = 3.0f, knockAgonyPause = 0.5f;   // length of one writhing spell, limp pause between spells
+	bool unconscious = true;             // actors the game has knocked unconscious (life state 3) get Delirium like knocked-out ones
+	float unconsciousAgonySeconds = 6.0f; // how long an unconscious actor keeps writhing before it lies limp and is handed back
+	bool stagger = true;                 // a shot actor staggers away from whoever shot it (direction taken from the attacker's position)
+	bool woundAgony = true;              // the agony depends on where the actor was hit: curl up for a gut shot, pedal with the good leg for a leg shot
+	bool lod = true;                     // far ragdolls are stepped at a lower rate
+	float lodNear = 900.0f, lodMid = 2200.0f, lodRateMid = 30.0f, lodRateFar = 20.0f;   // game units, steps per second
+	float frameBudgetMs = 2.5f;          // plugin time per frame it aims for; over it the step rates drop and new ragdolls are left to the game (0 = no limit)
+	int agentPool = 2;                   // agents built in advance while nothing is happening, so a kill does not cost a 30 ms hitch (0 = off)
 	bool knockdown = true;               // living actors knocked down by the game (explosion blast, knocked out) get Delirium until the game starts getting them up
 	bool playerDeath = false;             // the player's own death ragdoll gets Delirium too (needs the PlayerCharacter[206] slot probe)
 	// reactions

@@ -54,7 +54,19 @@ void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 }
 
 // ---- death detection (runs inside the probe thunks: tiny and lock-free) ----
-static volatile LONG g_dmgActor[64], g_dmgTick[64], g_dmgN;
+static volatile LONG g_dmgActor[64], g_dmgTick[64], g_dmgN, g_dmgAtk[64];
+static std::vector<NmAgent*> g_pool; static float g_lodScale = 1.0f; static double g_frameMs = 0;
+// Where the attacker of the latest hit on this actor stands (third argument of the damage slot), checked to be a real actor before it is believed.
+static bool AttackerPos(uint32_t victim, float out[3]) {
+	const DWORD now = GetTickCount(); LONG top = g_dmgN;
+	for (LONG i = top - 1; i >= 0 && i >= top - 64; i--) if ((uint32_t)g_dmgActor[i & 63] == victim && now - (DWORD)g_dmgTick[i & 63] <= 600) {
+		const uint32_t a = (uint32_t)g_dmgAtk[i & 63]; uint32_t vt = 0;
+		if (!a || a == victim || !Rd(a, &vt, 4) || (vt != 0x1086A6C && vt != 0x108AA3C && vt != 0x10870AC)) return false;
+		return Rd(a + 0x30, out, 12);
+	}
+	return false;
+}
+static float DistToPlayer(uint32_t actor) { uint32_t pl = 0; float ap[3], pp[3]; if (Rd(0x011DEA3C, &pl, 4) && pl && Rd(actor + 0x30, ap, 12) && Rd(pl + 0x30, pp, 12)) { const float dx = ap[0] - pp[0], dy = ap[1] - pp[1], dz = ap[2] - pp[2]; return std::sqrt(dx * dx + dy * dy + dz * dz); } return -1.0f; }
 static int DamageTicks(uint32_t actor, DWORD windowMs) { DWORD now = GetTickCount(); int n = 0; LONG top = g_dmgN; for (LONG i = top > 64 ? top - 64 : 0; i < top; i++) if ((uint32_t)g_dmgActor[i & 63] == actor && now - (DWORD)g_dmgTick[i & 63] <= windowMs) n++; return n; }
 static volatile LONG g_worldCalls, g_oddVt, g_ours;          // g_ours: set while we make our own motion-type calls
 static volatile LONG g_wake[32], g_ww;                      // collision objects the game switched back to a simulated motion type (a grab, an impulse)
@@ -69,7 +81,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	if (role == kRoleMotionType) { InterlockedIncrement(&g_mtAll); if (stack[1] == 1) InterlockedIncrement(&g_mtDyn); LONG ri = (InterlockedIncrement(&g_mtRingN) - 1) & 127; g_mtPtr[ri] = (LONG)thisPtr; g_mtTick[ri] = (LONG)now; g_mtVal[ri] = (LONG)stack[1]; }
 	if (role == kRoleDamage) { uint32_t pl0 = 0; if (Rd(0x011DEA3C, &pl0, 4) && pl0 == thisPtr) InterlockedIncrement(&g_plDmg); }
 	if (role == kRoleDamage && !g_x.playerDeath) { uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl == thisPtr) return; }
-	if (role == kRoleDamage) { g_lastDmgActor = (LONG)thisPtr; g_lastDmgTick = (LONG)now; LONG di = InterlockedIncrement(&g_dmgN) - 1; g_dmgActor[di & 63] = (LONG)thisPtr; g_dmgTick[di & 63] = (LONG)now; }
+	if (role == kRoleDamage) { g_lastDmgActor = (LONG)thisPtr; g_lastDmgTick = (LONG)now; LONG di = InterlockedIncrement(&g_dmgN) - 1; g_dmgActor[di & 63] = (LONG)thisPtr; g_dmgTick[di & 63] = (LONG)now; g_dmgAtk[di & 63] = (LONG)stack[3]; }
 	else if (role == kRoleMotionType && (stack[1] == 1 || stack[1] == 2 || stack[1] == 3 || stack[1] == 6) && now - (DWORD)g_lastDmgTick > 100) { LONG w = InterlockedIncrement(&g_ww) - 1; g_wake[w & 31] = (LONG)thisPtr; }
 	else if (role == kRoleMotionType && stack[1] == 1 /* dynamic */ && now - (DWORD)g_lastDmgTick <= 100) {
 		LONG a = g_lastDmgActor;
@@ -81,6 +93,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 
 // ---- sessions ----
 struct Session {
+	bool unconscious = false; int woundPart = -1; int lodFrame = 0; float lodRate = 0;   // life state 3; the rig part that was hit (-1 unknown); distance-based step rate
 	bool knock = false; int knockState = 0;                      // a living actor knocked down (game knock state 1 explode, 3 knocked out), not a corpse
 	int phase = 0;                                              // 1 pose sampled, 2 simulating, 3 holding the final pose
 	uint32_t actor = 0, root = 0, vt0 = 0, refId = 0; WorldXform rootW{}; bool verbose = false; unsigned id = 0;
@@ -225,6 +238,9 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	const double b0 = NowMs();
 	DWORD now = GetTickCount();
 	for (Session* a : g_active) if (a->actor == actor) return;
+	uint32_t ls0 = 0xFFFF; Rd(actor + 0x108, &ls0, 4); const bool uncon = ls0 == 3 && g_x.unconscious;
+	if (ls0 == 3 && !g_x.unconscious) return;
+	if (uncon) { knock = true; knockState = 3; }
 	std::map<uint32_t, DWORD>& rmap = knock ? g_recentKnock : g_recent;
 	auto rc = rmap.find(actor); if (rc != rmap.end() && now - rc->second < (knock ? 3000u : 90000u)) return;         // dying then dead fire two bursts
 	int sim = 0; for (Session* a : g_active) if (a->phase < 3) sim++;
@@ -233,12 +249,13 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 		uint32_t pl = 0; float ap[3], pp[3];
 		if (Rd(0x011DEA3C, &pl, 4) && pl && Rd(actor + 0x30, ap, 12) && Rd(pl + 0x30, pp, 12)) { const float dx = ap[0] - pp[0], dy = ap[1] - pp[1], dz = ap[2] - pp[2]; if (dx * dx + dy * dy + dz * dz > g_x.maxDistance * g_x.maxDistance) { rmap[actor] = now; return; } }
 	}
+	if (g_x.frameBudgetMs > 0 && g_lodScale <= 0.3f && g_active.size() >= 3) { rmap[actor] = now; static int said2 = 0; if (said2++ < 3) Log("observe: over the frame budget with %d ragdolls, leaving actor %08X to the game", (int)g_active.size(), actor); return; }
 	if (g_x.minFps > 0 && g_fps > 0 && g_fps < g_x.minFps) { rmap[actor] = now; static int said = 0; if (said++ < 5) Log("observe: frame rate %.0f is below MinFps %.0f, corpse left to the game", g_fps, g_x.minFps); return; }
 	if (g_active.size() >= 24) for (size_t i = 0; i < g_active.size(); i++) if (g_active[i]->phase == 3) { Free(g_active[i]); delete g_active[i]; g_active.erase(g_active.begin() + i); break; }   // drop the oldest held pose
 	rmap[actor] = now;
-	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->knock = knock; s->knockState = knockState; s->verbose = s->id <= 4;
+	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->knock = knock; s->knockState = knockState; s->unconscious = uncon; s->verbose = s->id <= 4;
 	if (knock) { static int kn = 0; s->verbose = kn++ < 6; }
-	if (s->verbose) { if (knock) Log("observe[%u]: knockdown (game knock state %d), actor %08X", s->id, knockState, actor); else Log("observe[%u]: death burst, actor %08X", s->id, actor); }
+	if (s->verbose) { if (knock) Log(uncon ? "observe[%u]: unconscious (life state 3, knock state %d), actor %08X" : "observe[%u]: knockdown (game knock state %d), actor %08X", s->id, knockState, actor); else Log("observe[%u]: death burst, actor %08X", s->id, actor); }
 	{ uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl == actor) { s->verbose = true; uint8_t tp = 0; uint32_t fp = 0; Rd(actor + 0x64A, &tp, 1); Rd(actor + 0x68C, &fp, 4); Log("observe[%u]: this is the player (third-person flag %u, first-person node %08X)", s->id, (unsigned)tp, fp); } }
 	s->root = ActorRoot(actor); Rd(actor, &s->vt0, 4); Rd(actor + 0xC, &s->refId, 4);   // identity, to notice the memory being reused by another actor
 	if (!s->root || !NodeWorld(s->root, s->rootW)) { if (s->verbose) Log("observe[%u]: cannot read the actor's 3D", s->id); delete s; return; }
@@ -260,7 +277,7 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	auto find = [&](const std::string& n) -> uint32_t { auto it = bones.find(n); return it == bones.end() ? 0 : it->second; };
 	for (int i = 0; i < 21; i++) {
 		s->bone[i] = find(g_rig.part[i].ref); s->boneA[i] = find(g_rig.part[i].jointA); s->boneB[i] = find(g_rig.part[i].jointB);
-		if (!s->bone[i] || !s->boneA[i] || !s->boneB[i]) { Log("observe[%u]: bone '%s' not found on this actor (not a humanoid?), skipping", s->id, g_rig.part[i].ref.c_str()); delete s; return; }
+		if (!s->bone[i] || !s->boneA[i] || !s->boneB[i]) { uint32_t vt = 0; Rd(actor, &vt, 4); static int nh = 0; if (nh++ < 8) Log("observe[%u]: bone '%s' not found on actor %08X (class %s): no humanoid skeleton, left to the game", s->id, g_rig.part[i].ref.c_str(), actor, vt == 0x10870AC ? "creature" : vt == 0x1086A6C ? "character" : "other"); delete s; return; }
 	}
 	if (g_skipDismembered) {                                                                // a cut-off limb is hidden by scaling its bone to nothing; only those actors are left to the game
 		s->hiddenMask = HiddenMask(*s); s->headGone = (s->hiddenMask & HeadMask()) != 0; s->legGone = (s->hiddenMask & LegMask()) != 0;
@@ -414,7 +431,10 @@ struct MsgB {                                                                   
 };
 // A knocked-down actor keeps fumbling on the floor until the game gets it up: cycles of writhing, pedalling and curling with short limp pauses.
 static void ScheduleAgony(Session& s) {
-	const float t = s.rt, len = std::max(1.5f, g_x.knockAgonySeconds * (0.7f + 0.6f * Rnd01())), r = Rnd01();
+	if (s.unconscious && s.rt > g_x.unconsciousAgonySeconds) return;                       // an unconscious actor stops writhing after a while and lies limp
+	const float t = s.rt, len = std::max(1.5f, g_x.knockAgonySeconds * (0.7f + 0.6f * Rnd01()));
+	float r = Rnd01();
+	if (g_x.woundAgony && s.woundPart >= 0) { const int w = s.woundPart; const bool leg = w >= 1 && w <= 6; r = leg ? r * 0.7f : 0.3f + r * 0.7f; }   // a leg shot writhes and pedals; a gut, arm or head shot curls up around the wound
 	s.tl.push_back({ t, A_STOP_ALL, 0 });
 	if (r < 0.4f) { s.tl.push_back({ t + 0.05f, A_WRITHE_FULL, 0 }); s.tl.push_back({ t + 0.05f, A_PEDAL_ON, 0 }); }
 	else if (r < 0.7f) { s.tl.push_back({ t + 0.05f, A_ROLLUP_ON, 0 }); s.tl.push_back({ t + 0.05f, A_PEDAL_ON, 0 }); }
@@ -429,7 +449,8 @@ static void DoAct(Session& s, int a, float v) {
 		MsgB(s, "bodyWrithe").b("start", true).f("armStiffness", K).f("legStiffness", K).f("backStiffness", K).f("legPeriod", P * 0.9f).f("armPeriod", P).f("backPeriod", P * 1.3f)
 			.f("legDamping", 1.0f).f("armDamping", 1.0f).f("backDamping", 1.0f).f("legAmplitude", A).f("armAmplitude", A).f("backAmplitude", A * 0.8f).f("kneeAmplitude", A).f("elbowAmplitude", A)
 			.t("mask", a == A_WRITHE_FULL ? "fb" : "ub").b("rollOverFlag", a == A_WRITHE_FULL).send(); break;
-	case A_PEDAL_ON: MsgB(s, "pedalLegs").b("start", true).b("backPedal", false).f("legStiffness", K).b("pedalLeftLeg", true).b("pedalRightLeg", true).f("radius", 0.25f).f("angularSpeed", 6.0f).f("pedalOffset", 0.0f).f("speedAsymmetry", 0.3f).b("adaptivePedal4Dragging", false).send(); break;
+	case A_PEDAL_ON: { bool pl = true, pr = true; if (g_x.woundAgony && s.knock) { if (s.woundPart >= 1 && s.woundPart <= 3) pl = false; else if (s.woundPart >= 4 && s.woundPart <= 6) pr = false; }   // the hurt leg stays limp
+		MsgB(s, "pedalLegs").b("start", true).b("backPedal", false).f("legStiffness", K).b("pedalLeftLeg", pl).b("pedalRightLeg", pr).f("radius", 0.25f).f("angularSpeed", 6.0f).f("pedalOffset", 0.0f).f("speedAsymmetry", 0.3f).b("adaptivePedal4Dragging", false).send(); } break;
 	case A_CURL_ON: MsgB(s, "bodyFoetal").b("start", true).t("mask", "fb").f("stiffness", K * 0.9f).f("asymmetry", 0.3f).f("dampingFactor", 1.0f).f("backTwist", 0.3f).send(); break;
 	case A_ROLLUP_ON: MsgB(s, "bodyRollUp").b("start", true).t("mask", "fb").f("stiffness", K * 0.9f).f("legPush", 0.6f).f("armReachAmount", 0.5f).f("useArmToSlowDown", 0.5f).f("asymmetricalLegs", 0.3f).send(); break;
 	case A_EXPLOSION: {                                                                         // like the engine's own explosion reaction: curl and pedal, or writhe, or windmill and pedal
@@ -484,7 +505,7 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 		delete s.ground; s.ground = nullptr;
 	}
 	if (!meshed) g_api->nm_world_add_floor(s.world, 0, 0, s.floorDrop > 0 ? -s.floorDrop - 0.02f : 0.0f, 100.0f);
-	s.agent = g_api->nm_agent_create(g_fit, zero, 0.0f, 0.3f);
+	if (!g_pool.empty()) { s.agent = g_pool.back(); g_pool.pop_back(); } else { const double c0 = NowMs(); s.agent = g_api->nm_agent_create(g_fit, zero, 0.0f, 0.3f); if (s.verbose) Log("observe[%u]: no agent in the pool, built one in %.1f ms", s.id, NowMs() - c0); }
 	if (!s.agent) return false;
 	g_api->nm_agent_set_mode(s.agent, NM_MODE_LEAD);
 	g_api->nm_agent_set_part_states(s.agent, st, 21); g_api->nm_agent_set_zero_pose(s.agent, zp, 21);
@@ -495,6 +516,14 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 		const float hl = len(hitDir); if (hl > 0.05f) { dir[0] = hitDir.x / hl; dir[1] = hitDir.y / hl; dir[2] = hitDir.z / hl; }
 		if (s.verbose) Log("observe[%u]: hit location: %s (part %d), kicked %.1f m/s relative to the rest", s.id, PartName(hitPart), hitPart, len(hitDir));
 	} else if (s.verbose && g_hitLoc) Log("observe[%u]: hit location unclear, treating it as a chest hit", s.id);
+	s.woundPart = located ? hitPart : -1;
+	if (g_x.stagger && !s.knock) {                                                               // push it away from whoever shot it
+		float ap[3], vp[3];
+		if (AttackerPos(s.actor, ap) && Rd(s.actor + 0x30, vp, 12)) {
+			const float dx = vp[0] - ap[0], dy = vp[1] - ap[1], l = std::sqrt(dx * dx + dy * dy);
+			if (l > 1.0f) { V3 rd = mulMTV(s.rootW.R, V3{ dx / l, dy / l, 0.0f }); const float rl = len(rd); if (rl > 0.01f) { dir[0] = rd.x / rl; dir[1] = rd.y / rl; dir[2] = rd.z / rl; if (s.verbose) Log("observe[%u]: staggering away from the attacker", s.id); } }
+		}
+	}
 	float health = g_shotHealth;                                                              // 'fatal' by default: the body collapses at once
 	const float rr = Rnd01();
 	const bool airborne = g_x.fall && s.floorDrop > 0.0f && !s.headGone;                          // shot in the air, or thrown off a ledge
@@ -602,7 +631,7 @@ static bool Step(Session& s) {
 		if (ls == 1 || ls == 2) { s.knock = false; if (s.verbose) Log("observe[%u]: the knocked-down actor died, carrying on as a death", s.id); }
 		else {
 			uint32_t pr = 0; uint8_t ks = 0xFF; Rd(s.actor + 0x68, &pr, 4); if (pr) Rd(pr + 0x13C, &ks, 1);
-			if (ls != 0 || ks < 1 || ks > 4) { Log("observe[%u]: knockdown over (knock state %d, life state %u), the game takes the body back", s.id, (int)(signed char)ks, ls); if (s.mode == 1) StopDrive(s); return false; }
+			if (s.unconscious ? ls != 3 : (ls != 0 || ks < 1 || ks > 4)) { Log("observe[%u]: knockdown over (knock state %d, life state %u), the game takes the body back", s.id, (int)(signed char)ks, ls); if (s.mode == 1) StopDrive(s); return false; }
 		}
 	}
 	if (!s.knock && ++s.lifeCheck % 15 == 0 && g_requireDead) {                              // revived, reloaded or replaced by a living actor: stop touching it
@@ -652,7 +681,14 @@ static bool Step(Session& s) {
 			}
 		}
 		while (s.tlNext < s.tl.size() && s.rt >= s.tl[s.tlNext].t) { DoAct(s, s.tl[s.tlNext].a, s.tl[s.tlNext].v); s.tlNext++; }   // scripted flailing, curling, bracing
-		s.simAcc += dt; const bool stepNow = g_x.simRate <= 0 || s.frame <= 2 || s.simAcc >= 1.0f / g_x.simRate;               // the engine need not run at 144 Hz
+		if (s.lodFrame-- <= 0) {                                                                       // step rate by distance to the player, every 20 frames
+			s.lodFrame = 20; const float d = DistToPlayer(s.actor); s.lodRate = 0;
+			if (g_x.lod && d >= 0) s.lodRate = d < g_x.lodNear ? 0.0f : d < g_x.lodMid ? g_x.lodRateMid : g_x.lodRateFar;
+			if (g_x.maxDistance > 0 && d > g_x.maxDistance * 1.3f) { Log("observe[%u]: %.0f units from the player, handing it back to the game", s.id, d); if (s.mode == 1) StopDrive(s); return false; }
+		}
+		float rate = g_x.simRate > 0 ? g_x.simRate : 120.0f; if (s.lodRate > 0) rate = std::min(rate, s.lodRate);
+		if (g_x.frameBudgetMs > 0) rate = std::max(12.0f, rate * g_lodScale);
+		s.simAcc += dt; const bool stepNow = (g_x.simRate <= 0 && s.lodRate <= 0 && g_lodScale >= 0.999f) || s.frame <= 2 || s.simAcc >= 1.0f / rate;               // the engine need not run at 144 Hz
 		float sdt = dt;
 		if (stepNow) { sdt = std::min(s.simAcc, 0.1f); s.simAcc = 0; g_api->nm_agent_step(s.agent, s.world, sdt); if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false; }
 		if (s.mode == 1) {
@@ -683,7 +719,7 @@ static bool Step(Session& s) {
 		{ Log("observe[%u] f%03u dt=%.1fms (wall %.1f) pelvis z=%.2f head z=%.2f fastest part %.2f m/s | wrote %u bones + %u below | game moved them %.2f units", s.id, s.frame, dt * 1000, wallMs, s.tr[2], s.tr[12 * 7 + 2], fastest, s.nWritten, s.nPropagated, s.mode == 1 ? s.driveErr : dev);
 		  if (s.mode == 1) Log("observe[%u]   body drive: mean distance to the target %.1f units", s.id, s.driveErr);
 		  if (dev > 1.0f && s.mode == 0) { std::string nm; NodeName(worstN, nm); Log("observe[%u]   worst bone '%s' off by (%.1f %.1f %.1f)", s.id, nm.c_str(), worstD.x, worstD.y, worstD.z); } }
-		const bool agony = s.knock && g_x.knockAgony && (s.knockState != 3 || g_x.knockOutAgony);
+		const bool agony = s.knock && !s.unconscious && g_x.knockAgony && (s.knockState != 3 || g_x.knockOutAgony);
 		if (agony ? s.simTime >= 60.0f : (s.calmT >= g_x.restSeconds || s.simTime >= g_simSeconds)) {
 			Free(&s);
 			if (s.mode == 1) { StopDrive(s); Log("observe[%u]: at rest after %u frames, the game's bodies carry on from here", s.id, s.frame); return false; }
@@ -733,8 +769,8 @@ static void KnockWatch() {
 		if (now - (DWORD)g_dmgTick[i & 63] > 6000) continue;
 		const uint32_t a = (uint32_t)g_dmgActor[i & 63]; bool dup = false; for (int k = 0; k < ns; k++) if (seen[k] == a) { dup = true; break; }
 		if (dup || ns >= 64) continue; seen[ns++] = a;
-		uint32_t vt = 0, ls = 0xFFFF, pr = 0; if (!Rd(a, &vt, 4) || vt != 0x1086A6C || !Rd(a + 0x108, &ls, 4) || ls != 0 || !Rd(a + 0x68, &pr, 4) || pr < 0x10000) continue;
-		uint8_t ks = 0; if (!Rd(pr + 0x13C, &ks, 1) || (ks != 1 && ks != 3)) continue;
+		uint32_t vt = 0, ls = 0xFFFF, pr = 0; if (!Rd(a, &vt, 4) || (vt != 0x1086A6C && vt != 0x10870AC) || !Rd(a + 0x108, &ls, 4) || (ls != 0 && ls != 3) || !Rd(a + 0x68, &pr, 4) || pr < 0x10000) continue;
+		uint8_t ks = 0; if (ls == 3) { if (!g_x.unconscious) continue; ks = 3; } else if (!Rd(pr + 0x13C, &ks, 1) || (ks != 1 && ks != 3)) continue;
 		bool busy = false; for (Session* s : g_active) if (s->actor == a) { busy = true; break; }
 		if (!busy) Begin(a, true, (int)ks);
 	}
@@ -780,10 +816,20 @@ void ObserveTick() {
 	if (g_x.playerDeath) PlayerWatch();
 	KnockWatch();
 	while (g_qr != g_qw) { uint32_t a = (uint32_t)g_q[g_qr & 15]; g_qr++; Begin(a); }
+	g_frameMs = 0;
 	for (size_t i = 0; i < g_active.size();) {
 		const double s0 = NowMs(); const bool keep = Step(*g_active[i]); const double c = NowMs() - s0;
-		g_active[i]->costSum += c; g_active[i]->costMax = std::max(g_active[i]->costMax, c); g_active[i]->costN++;
+		g_frameMs += c; g_active[i]->costSum += c; g_active[i]->costMax = std::max(g_active[i]->costMax, c); g_active[i]->costN++;
 		if (keep) { i++; continue; }
 		PerfLog(*g_active[i]); Free(g_active[i]); delete g_active[i]; g_active.erase(g_active.begin() + i);
+	}
+	if (g_x.frameBudgetMs > 0) {                                                                   // over budget: step slower, back up when there is room again
+		if (g_active.empty()) g_lodScale = 1.0f;
+		else if (g_frameMs > g_x.frameBudgetMs) g_lodScale = std::max(0.25f, g_lodScale * 0.95f);
+		else g_lodScale = std::min(1.0f, g_lodScale * 1.02f);
+	}
+	if (g_x.agentPool > 0 && g_api && g_fit && (int)g_pool.size() < g_x.agentPool && GetTickCount() - (DWORD)g_lastDmgTick > 2500) {   // build agents in advance while nothing is going on
+		static int made = 0; const float zero[3] = { 0, 0, 0 }; const double c0 = NowMs(); NmAgent* a = g_api->nm_agent_create(g_fit, zero, 0.0f, 0.3f);
+		if (a) { g_pool.push_back(a); if (made++ < 3) Log("pool: built an agent in advance in %.1f ms", NowMs() - c0); }
 	}
 }

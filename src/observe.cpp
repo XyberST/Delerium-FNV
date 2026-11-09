@@ -65,6 +65,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	DWORD now = GetTickCount();
 	if (role == kRoleWorld || role == kRolePick) { uint32_t vt = 0; InterlockedIncrement(&g_worldCalls); if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); else g_oddVt = (LONG)vt; return; }   // any call on a bhkWorld tells us the physics world
 	if (role == kRoleMotionType && g_ours) return;
+	if (role == kRoleDamage && !g_x.playerDeath) { uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl == thisPtr) return; }
 	if (role == kRoleDamage) { g_lastDmgActor = (LONG)thisPtr; g_lastDmgTick = (LONG)now; LONG di = InterlockedIncrement(&g_dmgN) - 1; g_dmgActor[di & 63] = (LONG)thisPtr; g_dmgTick[di & 63] = (LONG)now; }
 	else if (role == kRoleMotionType && (stack[1] == 1 || stack[1] == 2 || stack[1] == 3 || stack[1] == 6) && now - (DWORD)g_lastDmgTick > 100) { LONG w = InterlockedIncrement(&g_ww) - 1; g_wake[w & 31] = (LONG)thisPtr; }
 	else if (role == kRoleMotionType && stack[1] == 1 /* dynamic */ && now - (DWORD)g_lastDmgTick <= 100) {
@@ -232,6 +233,7 @@ static void Begin(uint32_t actor) {
 	g_recent[actor] = now;
 	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->verbose = s->id <= 4;
 	if (s->verbose) Log("observe[%u]: death burst, actor %08X", s->id, actor);
+	{ uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl == actor) { s->verbose = true; uint8_t tp = 0; uint32_t fp = 0; Rd(actor + 0x64A, &tp, 1); Rd(actor + 0x68C, &fp, 4); Log("observe[%u]: this is the player (third-person flag %u, first-person node %08X)", s->id, (unsigned)tp, fp); } }
 	s->root = ActorRoot(actor); Rd(actor, &s->vt0, 4); Rd(actor + 0xC, &s->refId, 4);   // identity, to notice the memory being reused by another actor
 	if (!s->root || !NodeWorld(s->root, s->rootW)) { if (s->verbose) Log("observe[%u]: cannot read the actor's 3D", s->id); delete s; return; }
 	if (!g_rig.ok || !g_api || !g_fit) { delete s; return; }

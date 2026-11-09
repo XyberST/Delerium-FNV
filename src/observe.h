@@ -52,6 +52,7 @@ struct ExtraCfg {
 	float maxDistance = 4000.0f;         // game units; corpses farther from the player are left to the game (0 = no limit)
 	float minFps = 25.0f;                // below this frame rate new corpses are left to the game (0 = off)
 	bool profile = true;                 // log what each corpse cost
+	bool playerDeath = true;             // the player's own death ragdoll gets Delirium too (needs the PlayerCharacter[206] slot probe)
 	// reactions
 	bool burn = true, shock = true, explosion = true, gutCurl = true, fall = true, dumpNodes = true, burnByDamageTicks = true;
 	float burnBalanceSeconds = 1.2f, burnFlailSeconds = 4.0f; int dotTicks = 3; float dotWindow = 6.0f;

@@ -93,6 +93,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 
 // ---- sessions ----
 struct Session {
+	double stageMs[3] = { 0, 0, 0 };                              // start-up timings
 	bool unconscious = false; int woundPart = -1; int lodFrame = 0; float lodRate = 0;   // life state 3; the rig part that was hit (-1 unknown); distance-based step rate
 	bool knock = false; int knockState = 0;                      // a living actor knocked down (game knock state 1 explode, 3 knocked out), not a corpse
 	int phase = 0;                                              // 1 pose sampled, 2 simulating, 3 holding the final pose
@@ -467,6 +468,7 @@ static void DoAct(Session& s, int a, float v) {
 }
 
 static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, float dt) {
+	const double T0 = NowMs();
 	uint32_t ls = 0xFFFF; Rd(s.actor + 0x108, &ls, 4);                    // Actor::lifeState: 1 dying, 2 dead
 	if (s.verbose) Log("observe[%u]: actor %08X life state %u one frame after the burst", s.id, s.actor, ls);
 	if (g_requireDead && !s.knock && ls != 1 && ls != 2) { if (s.verbose) Log("observe[%u]: not dying or dead, leaving it to the game", s.id); return false; }
@@ -505,10 +507,12 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 		delete s.ground; s.ground = nullptr;
 	}
 	if (!meshed) g_api->nm_world_add_floor(s.world, 0, 0, s.floorDrop > 0 ? -s.floorDrop - 0.02f : 0.0f, 100.0f);
+	const double T1 = NowMs();
 	if (!g_pool.empty()) { s.agent = g_pool.back(); g_pool.pop_back(); } else { const double c0 = NowMs(); s.agent = g_api->nm_agent_create(g_fit, zero, 0.0f, 0.3f); if (s.verbose) Log("observe[%u]: no agent in the pool, built one in %.1f ms", s.id, NowMs() - c0); }
 	if (!s.agent) return false;
 	g_api->nm_agent_set_mode(s.agent, NM_MODE_LEAD);
 	g_api->nm_agent_set_part_states(s.agent, st, 21); g_api->nm_agent_set_zero_pose(s.agent, zp, 21);
+	const double T2 = NowMs();
 	V3 chest = p[10], cv = vel[10]; float hs = std::sqrt(cv.x * cv.x + cv.y * cv.y);
 	float at[3] = { chest.x, chest.y, chest.z }, dir[3] = { hs > 0.05f ? cv.x / hs : 0.0f, hs > 0.05f ? cv.y / hs : 1.0f, 0.0f };
 	if (located) {                                                                                // aim the engine's shot reaction at the part that was really hit, from the direction it was kicked
@@ -565,12 +569,14 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 		if (s.verbose) Log("observe[%u]: balancing for about %.1f s (chest speed %.1f m/s)", s.id, s.balanceFor, chestSpeed);
 	} else if (s.verbose && g_balance) Log("observe[%u]: no balancing (%s, chest speed %.1f m/s)", s.id, s.headGone ? "head is gone" : (s.legGone ? "a leg is cut off" : (regionMul <= 0.0f ? "hit in the head" : "thrown too hard")), chestSpeed);
 	if (!skipShot) g_api->nm_agent_task_shot(s.agent, s.world, nullptr, hitPart, at, dir, health);
+	const double T3 = NowMs(); s.stageMs[0] = T1 - T0; s.stageMs[1] = T2 - T1; s.stageMs[2] = T3 - T2;
 	if (s.knock && g_x.knockAgony && (s.knockState != 3 || g_x.knockOutAgony)) { float lastT = 0; for (const auto& e : s.tl) lastT = std::max(lastT, e.t); s.tl.push_back({ s.tl.empty() ? 1.0f : lastT + 0.15f, A_AGONY_NEXT, 0 }); if (s.verbose) Log("observe[%u]: will keep fumbling on the floor until the game gets it up", s.id); }
 	s.last = c; s.frame = 0; s.phase = 2;
 	s.mode = (g_driveBodies && SetupDriveBodies(s)) ? 1 : 0;
 	if (!s.mode && s.hiddenMask && g_skipDismembered) { Log("observe[%u]: cut-off limb and the bodies cannot be driven, leaving the corpse to the game", s.id); return false; }
 	if (!s.mode) KeyframeGameBodies(s);
 	if (s.verbose) Log("observe[%u]: Delirium body started (pelvis %.2f m/s, chest %.2f m/s)", s.id, len(vel[0]), len(vel[10]));
+	if (s.verbose) Log("observe[%u]: start-up stages: world and ground mesh %.1f ms, agent %.1f ms, shot %.1f ms, drive set-up %.1f ms", s.id, s.stageMs[0], s.stageMs[1], s.stageMs[2], NowMs() - T3);
 	return true;
 }
 
@@ -690,7 +696,7 @@ static bool Step(Session& s) {
 		if (g_x.frameBudgetMs > 0) rate = std::max(12.0f, rate * g_lodScale);
 		s.simAcc += dt; const bool stepNow = (g_x.simRate <= 0 && s.lodRate <= 0 && g_lodScale >= 0.999f) || s.frame <= 2 || s.simAcc >= 1.0f / rate;               // the engine need not run at 144 Hz
 		float sdt = dt;
-		if (stepNow) { sdt = std::min(s.simAcc, 0.1f); s.simAcc = 0; g_api->nm_agent_step(s.agent, s.world, sdt); if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false; }
+		if (stepNow) { sdt = std::min(s.simAcc, 0.1f); s.simAcc = 0; const double q0 = NowMs(); g_api->nm_agent_step(s.agent, s.world, sdt); if (s.verbose && s.frame <= 2) Log("observe[%u]: engine step on frame %u took %.1f ms", s.id, (unsigned)s.frame, NowMs() - q0); if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false; }
 		if (s.mode == 1) {
 			if (s.balancing && !s.headGone && (s.frame & 3) == 0 && (HiddenMask(s) & HeadMask())) {   // the head was just shot off: no more balancing
 				s.headGone = true; s.balancing = false; s.relaxed = true; s.tl.clear(); s.tlNext = 0;

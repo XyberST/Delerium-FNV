@@ -30,7 +30,7 @@ static uint8_t* EmitThunk(uint32_t idx, uint32_t continueTo) {
 	return start;
 }
 static int RoleFor(const char* label) {
-	if (strcmp(label, "Character[206]") == 0 || strcmp(label, "PlayerCharacter[206]") == 0) return kRoleDamage;
+	if (strcmp(label, "Character[206]") == 0 || strcmp(label, "Creature[206]") == 0 || strcmp(label, "PlayerCharacter[206]") == 0) return kRoleDamage;
 	if (strcmp(label, "bhkBlendCollisionObject[44]") == 0) return kRoleMotionType;
 	if (strcmp(label, "bhkWorld[50]") == 0) return kRolePick;
 	if (strncmp(label, "bhkWorld[", 9) == 0) return kRoleWorld;

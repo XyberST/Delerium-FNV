@@ -59,12 +59,15 @@ static int DamageTicks(uint32_t actor, DWORD windowMs) { DWORD now = GetTickCoun
 static volatile LONG g_worldCalls, g_oddVt, g_ours;          // g_ours: set while we make our own motion-type calls
 static volatile LONG g_wake[32], g_ww;                      // collision objects the game switched back to a simulated motion type (a grab, an impulse)
 static volatile LONG g_lastDmgActor, g_lastDmgTick;
+static volatile LONG g_mtAll, g_mtDyn, g_plDmg, g_mtRingN; static volatile LONG g_mtPtr[128], g_mtTick[128], g_mtVal[128];   // every motion-type call (object, time, new type) for the player diagnostics
 static volatile LONG g_q[16], g_qw, g_qr; static volatile LONG g_lastQ, g_lastQTick;
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	if (!g_enabled) return;
 	DWORD now = GetTickCount();
 	if (role == kRoleWorld || role == kRolePick) { uint32_t vt = 0; InterlockedIncrement(&g_worldCalls); if (Rd(thisPtr, &vt, 4) && vt == 0x10C40B4) PickSetWorld(thisPtr); else g_oddVt = (LONG)vt; return; }   // any call on a bhkWorld tells us the physics world
 	if (role == kRoleMotionType && g_ours) return;
+	if (role == kRoleMotionType) { InterlockedIncrement(&g_mtAll); if (stack[1] == 1) InterlockedIncrement(&g_mtDyn); LONG ri = (InterlockedIncrement(&g_mtRingN) - 1) & 127; g_mtPtr[ri] = (LONG)thisPtr; g_mtTick[ri] = (LONG)now; g_mtVal[ri] = (LONG)stack[1]; }
+	if (role == kRoleDamage) { uint32_t pl0 = 0; if (Rd(0x011DEA3C, &pl0, 4) && pl0 == thisPtr) InterlockedIncrement(&g_plDmg); }
 	if (role == kRoleDamage && !g_x.playerDeath) { uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl == thisPtr) return; }
 	if (role == kRoleDamage) { g_lastDmgActor = (LONG)thisPtr; g_lastDmgTick = (LONG)now; LONG di = InterlockedIncrement(&g_dmgN) - 1; g_dmgActor[di & 63] = (LONG)thisPtr; g_dmgTick[di & 63] = (LONG)now; }
 	else if (role == kRoleMotionType && (stack[1] == 1 || stack[1] == 2 || stack[1] == 3 || stack[1] == 6) && now - (DWORD)g_lastDmgTick > 100) { LONG w = InterlockedIncrement(&g_ww) - 1; g_wake[w & 31] = (LONG)thisPtr; }
@@ -693,11 +696,45 @@ static void PollReloadKey() {
 	if (down && !wasDown) g_reloadFn();
 	wasDown = down;
 }
+
+// The player: log what the game does when the player dies, and start Delirium from the life state when no kill burst was seen.
+static void PlayerWatch() {
+	static uint32_t lastLs = 0xFFFF; static DWORD deathTick = 0; static bool reported = false, forced = false;
+	uint32_t pl = 0; if (!Rd(0x011DEA3C, &pl, 4) || !pl) return;
+	uint32_t ls = 0xFFFF; if (!Rd(pl + 0x108, &ls, 4)) return;
+	const DWORD now = GetTickCount();
+	if (ls != lastLs) {
+		uint8_t tp = 0; Rd(pl + 0x64A, &tp, 1);
+		Log("player: life state %u -> %u (third-person flag %u, player damage hits so far %ld)", lastLs, ls, (unsigned)tp, (long)g_plDmg);
+		if ((ls == 1 || ls == 2) && lastLs != 1 && lastLs != 2) { deathTick = now; reported = false; forced = false; }
+		if (ls == 0) deathTick = 0;
+		lastLs = ls;
+	}
+	if (!deathTick) return;
+	const DWORD dt = now - deathTick;
+	if (!forced && g_x.playerDeath && dt > 300) {
+		forced = true;
+		if (g_recent.find(pl) == g_recent.end()) { Log("player: no kill burst was seen, starting Delirium from the life state"); Begin(pl); }
+	}
+	if (!reported && dt > 1500) {
+		reported = true;
+		std::map<uint32_t, bool> mine; uint32_t root = ActorRoot(pl); int bodies = 0;
+		if (root) for (auto& kv : CollectBones(root)) { uint32_t co = 0, vt = 0; if (Rd(kv.second + 0x1C, &co, 4) && co && Rd(co, &vt, 4) && vt == 0x10C53DC) { mine[co] = true; bodies++; } }
+		int hit[8] = {}; int others = 0; LONG top = g_mtRingN;
+		for (LONG i = top > 128 ? top - 128 : 0; i < top; i++) {
+			if (now - (DWORD)g_mtTick[i & 127] > 5000) continue;
+			if (mine.count((uint32_t)g_mtPtr[i & 127])) { LONG v = g_mtVal[i & 127]; if (v >= 0 && v < 8) hit[v]++; } else others++;
+		}
+		Log("player: %d s after dying: root %08X, %d of the player's skeleton nodes carry a collision body; motion-type calls on them in the last 5 s by new type 0..6: %d %d %d %d %d %d %d (other objects: %d); player damage hits %ld",
+			(int)(dt / 1000), root, bodies, hit[0], hit[1], hit[2], hit[3], hit[4], hit[5], hit[6], others, (long)g_plDmg);
+	}
+}
 void ObserveTick() {
 	if (!g_enabled) return;
 	const double t0 = NowMs();
 	{ static double last = 0; if (last > 0) { const double d = t0 - last; if (d > 0.1 && d < 1000.0) { const float inst = (float)(1000.0 / d); g_fps = g_fps <= 0 ? inst : g_fps * 0.97f + inst * 0.03f; } } last = t0; }
 	PollReloadKey();
+	PlayerWatch();
 	while (g_qr != g_qw) { uint32_t a = (uint32_t)g_q[g_qr & 15]; g_qr++; Begin(a); }
 	for (size_t i = 0; i < g_active.size();) {
 		const double s0 = NowMs(); const bool keep = Step(*g_active[i]); const double c = NowMs() - s0;

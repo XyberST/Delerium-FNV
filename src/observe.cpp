@@ -28,7 +28,9 @@ static bool g_calibDone = false;
 static ExtraCfg g_x; static std::vector<std::string> g_burnKw, g_shockKw; static void (*g_reloadFn)() = nullptr; static int g_reloadVk = 0; static float g_fps = 0;
 static double NowMs() { static double inv = 0; LARGE_INTEGER c; if (!inv) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); inv = 1000.0 / (double)f.QuadPart; } QueryPerformanceCounter(&c); return (double)c.QuadPart * inv; }
 static std::vector<std::string> Split(const char* csv) { std::vector<std::string> r; std::string cur; for (const char* p = csv; ; p++) { if (*p == ',' || !*p) { if (!cur.empty()) r.push_back(cur); cur.clear(); if (!*p) break; } else if (*p != ' ') cur += (char)tolower((unsigned char)*p); } return r; }
-void ObserveSetExtra(const ExtraCfg& c) { g_x = c; g_burnKw = Split(c.burnKeywords); g_shockKw = Split(c.shockKeywords); }
+static std::vector<uint32_t> g_fireW, g_shockW;
+static std::vector<uint32_t> HexList(const char* csv) { std::vector<uint32_t> r; for (const std::string& t : Split(csv)) { char* e = nullptr; const unsigned long v = strtoul(t.c_str(), &e, 16); if (e != t.c_str() && v) r.push_back((uint32_t)v); } return r; }
+void ObserveSetExtra(const ExtraCfg& c) { g_x = c; g_burnKw = Split(c.burnKeywords); g_shockKw = Split(c.shockKeywords); g_fireW = HexList(c.fireWeapons); g_shockW = HexList(c.shockWeapons); }
 void ObserveSetReloadHook(void (*fn)(), int vk) { g_reloadFn = fn; g_reloadVk = vk; }
 static bool g_hitLoc = true; static float g_hitMin = 1.0f, g_mulHead = 0.0f, g_mulTorso = 1.0f, g_mulPelvis = 0.8f, g_mulLeg = 0.4f, g_mulArm = 1.3f;
 static bool g_driveBodies = true; static float g_driveGain = 1.0f, g_driveMax = 8.0f, g_driveAngGain = 0.4f;
@@ -74,6 +76,30 @@ static volatile LONG g_wake[32], g_ww;                      // collision objects
 static volatile LONG g_lastDmgActor, g_lastDmgTick;
 static volatile LONG g_mtAll, g_mtDyn, g_plDmg, g_mtRingN; static volatile LONG g_mtPtr[128], g_mtTick[128], g_mtVal[128];   // every motion-type call (object, time, new type) for the player diagnostics
 static volatile LONG g_q[16], g_qw, g_qr; static volatile LONG g_lastQ, g_lastQTick;
+static volatile LONG g_hdActor[32], g_hdTick[32], g_hdLoc[32], g_hdFlags[32], g_hdWeap[32], g_hdWType[32], g_hdN;       // the game's hit data of the latest hits
+static volatile LONG g_pushActor[16], g_pushTick[16], g_pushN;                                                                         // actors PushActorAway was called for
+// The damage slot runs inside the game's hit handling, whose HitData (0x64 bytes: attacker, target, source, hit location, flags, damages, weapon) sits in a caller frame:
+// look through the stack for a pointer to something shaped like that and aimed at this actor.
+static void ScanHitData(uint32_t actor, const uint32_t* stack, DWORD now) {
+	const uint32_t attacker = stack[3];
+	for (int k = 4; k < 4 + 160; k++) {
+		uint32_t p = 0; if (!Rd((uint32_t)(uintptr_t)&stack[k], &p, 4)) break; if (p < 0x10000 || (p & 3)) continue;
+		uint32_t h[0x19]; if (!Rd(p, h, sizeof h)) continue;
+		if (h[1] != actor || h[0] != attacker || h[3] > 40) continue;                                  // target, aggressor, a plausible hit location
+		uint32_t wf = 0; uint8_t wt = 0xFF; if (h[12] > 0x10000) { Rd(h[12] + 0xC, &wf, 4); Rd(h[12] + 0xF4, &wt, 1); }
+		LONG i = (InterlockedIncrement(&g_hdN) - 1) & 31;
+		g_hdActor[i] = (LONG)actor; g_hdTick[i] = (LONG)now; g_hdLoc[i] = (LONG)h[3]; g_hdFlags[i] = (LONG)h[4]; g_hdWeap[i] = (LONG)wf; g_hdWType[i] = (LONG)(signed char)wt;
+		static int said = 0; float dmg; memcpy(&dmg, &h[5], 4);
+		if (said++ < 14) Log("hit data: actor %08X location %u flags %08X weapon %08X (type %d) damage %.1f attacker %08X", actor, h[3], h[4], wf, (int)(signed char)wt, dmg, attacker);
+		return;
+	}
+}
+struct HitRec { bool ok = false; uint32_t loc = 0, flags = 0, weap = 0; int wtype = -1; };
+static HitRec RecentHit(uint32_t actor, DWORD now) {
+	HitRec r; LONG top = g_hdN;
+	for (LONG i = top - 1; i >= 0 && i >= top - 32; i--) if ((uint32_t)g_hdActor[i & 31] == actor && now - (DWORD)g_hdTick[i & 31] <= 800) { r.ok = true; r.loc = (uint32_t)g_hdLoc[i & 31]; r.flags = (uint32_t)g_hdFlags[i & 31]; r.weap = (uint32_t)g_hdWeap[i & 31]; r.wtype = (int)g_hdWType[i & 31]; return r; }
+	return r;
+}
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	if (!g_enabled) return;
 	DWORD now = GetTickCount();
@@ -81,6 +107,8 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 	if (role == kRoleMotionType && g_ours) return;
 	if (role == kRoleMotionType) { InterlockedIncrement(&g_mtAll); if (stack[1] == 1) InterlockedIncrement(&g_mtDyn); LONG ri = (InterlockedIncrement(&g_mtRingN) - 1) & 127; g_mtPtr[ri] = (LONG)thisPtr; g_mtTick[ri] = (LONG)now; g_mtVal[ri] = (LONG)stack[1]; }
 	if (role == kRoleDamage) { uint32_t pl0 = 0; if (Rd(0x011DEA3C, &pl0, 4) && pl0 == thisPtr) InterlockedIncrement(&g_plDmg); }
+	if (role == kRolePush) { LONG pi = (InterlockedIncrement(&g_pushN) - 1) & 15; g_pushActor[pi] = (LONG)stack[1]; g_pushTick[pi] = (LONG)now; static int ps = 0; if (ps++ < 8) { float f; memcpy(&f, &stack[5], 4); Log("push: PushActorAway on actor %08X, force %.1f", stack[1], f); } return; }
+	if (role == kRoleDamage && g_x.hitData) ScanHitData(thisPtr, stack, now);
 	if (role == kRoleDamage && !g_x.playerDeath) { uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl == thisPtr) return; }
 	if (role == kRoleDamage) { g_lastDmgActor = (LONG)thisPtr; g_lastDmgTick = (LONG)now; LONG di = InterlockedIncrement(&g_dmgN) - 1; g_dmgActor[di & 63] = (LONG)thisPtr; g_dmgTick[di & 63] = (LONG)now; g_dmgAtk[di & 63] = (LONG)stack[3]; }
 	else if (role == kRoleMotionType && (stack[1] == 1 || stack[1] == 2 || stack[1] == 3 || stack[1] == 6) && now - (DWORD)g_lastDmgTick > 100) { LONG w = InterlockedIncrement(&g_ww) - 1; g_wake[w & 31] = (LONG)thisPtr; }
@@ -95,6 +123,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 // ---- sessions ----
 struct Session {
 	double stageMs[3] = { 0, 0, 0 };                              // start-up timings
+	uint32_t unconState = 3; bool hitFire = false, hitShock = false; int hitLoc = -1;   // life state it went down with (3 unconscious, 6 essential down); the game's hit data
 	bool unconscious = false; int woundPart = -1; int lodFrame = 0; float lodRate = 0;   // life state 3; the rig part that was hit (-1 unknown); distance-based step rate
 	bool knock = false; int knockState = 0;                      // a living actor knocked down (game knock state 1 explode, 3 knocked out), not a corpse
 	int phase = 0;                                              // 1 pose sampled, 2 simulating, 3 holding the final pose
@@ -253,8 +282,9 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	const double b0 = NowMs();
 	DWORD now = GetTickCount();
 	for (Session* a : g_active) if (a->actor == actor) return;
-	uint32_t ls0 = 0xFFFF; Rd(actor + 0x108, &ls0, 4); const bool uncon = ls0 == 3 && g_x.unconscious;
-	if (ls0 == 3 && !g_x.unconscious) return;
+	uint32_t ls0 = 0xFFFF; Rd(actor + 0x108, &ls0, 4); const bool down = ls0 == 3 || ls0 == 6;                  // unconscious, or an essential actor that cannot die
+	const bool uncon = down && g_x.unconscious;
+	if (down && !g_x.unconscious) return;
 	if (uncon) { knock = true; knockState = 3; }
 	std::map<uint32_t, DWORD>& rmap = knock ? g_recentKnock : g_recent;
 	{ uint32_t avt = 0; Rd(actor, &avt, 4); if (avt == 0x10870AC && !g_x.creatures) return; auto rf = g_refusedLarge.find(actor); if (rf != g_refusedLarge.end() && now - rf->second < 60000) return; }
@@ -269,9 +299,16 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	if (g_x.minFps > 0 && g_fps > 0 && g_fps < g_x.minFps) { rmap[actor] = now; static int said = 0; if (said++ < 5) Log("observe: frame rate %.0f is below MinFps %.0f, corpse left to the game", g_fps, g_x.minFps); return; }
 	if (g_active.size() >= 24) for (size_t i = 0; i < g_active.size(); i++) if (g_active[i]->phase == 3) { Free(g_active[i]); delete g_active[i]; g_active.erase(g_active.begin() + i); break; }   // drop the oldest held pose
 	rmap[actor] = now;
-	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->knock = knock; s->knockState = knockState; s->unconscious = uncon; s->verbose = s->id <= 4;
+	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->knock = knock; s->knockState = knockState; s->unconscious = uncon; s->unconState = ls0; s->verbose = s->id <= 4;
 	if (knock) { static int kn = 0; s->verbose = kn++ < 6; }
-	if (s->verbose) { if (knock) Log(uncon ? "observe[%u]: unconscious (life state 3, knock state %d), actor %08X" : "observe[%u]: knockdown (game knock state %d), actor %08X", s->id, knockState, actor); else Log("observe[%u]: death burst, actor %08X", s->id, actor); }
+	{ const HitRec hr = g_x.hitData ? RecentHit(actor, now) : HitRec();
+	  if (hr.ok) {
+		s->hitLoc = (int)hr.loc;
+		for (uint32_t w : g_fireW) if (w == hr.weap) s->hitFire = true;
+		for (uint32_t w : g_shockW) if (w == hr.weap) s->hitShock = true;
+		if (s->verbose) Log("observe[%u]: the game's hit: location %u, flags %08X, weapon %08X (type %d)%s%s", s->id, hr.loc, hr.flags, hr.weap, hr.wtype, s->hitFire ? ", fire weapon" : "", s->hitShock ? ", shock weapon" : "");
+	  } }
+	if (s->verbose) { if (knock) Log(uncon ? "observe[%u]: unconscious or essential down (life state %d), actor %08X" : "observe[%u]: knockdown (game knock state %d), actor %08X", s->id, uncon ? (int)ls0 : knockState, actor); else Log("observe[%u]: death burst, actor %08X", s->id, actor); }
 	{ uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl == actor) { s->verbose = true; uint8_t tp = 0; uint32_t fp = 0; Rd(actor + 0x64A, &tp, 1); Rd(actor + 0x68C, &fp, 4); Log("observe[%u]: this is the player (third-person flag %u, first-person node %08X)", s->id, (unsigned)tp, fp); } }
 	s->root = ActorRoot(actor); Rd(actor, &s->vt0, 4); Rd(actor + 0xC, &s->refId, 4);   // identity, to notice the memory being reused by another actor
 	if (!s->root || !NodeWorld(s->root, s->rootW)) { if (s->verbose) Log("observe[%u]: cannot read the actor's 3D", s->id); delete s; return; }
@@ -619,8 +656,8 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	float health = g_shotHealth;                                                              // 'fatal' by default: the body collapses at once
 	const float rr = Rnd01();
 	const bool airborne = g_x.fall && s.floorDrop > 0.0f && !s.headGone;                          // shot in the air, or thrown off a ledge
-	const bool burning = !airborne && g_x.burn && willBalance && (s.nodeBurn || (g_x.burnByDamageTicks && s.dotCount >= g_x.dotTicks && chestSpeed < 2.0f));
-	const bool shocked = !airborne && !burning && g_x.shock && willBalance && s.nodeShock;
+	const bool burning = !airborne && g_x.burn && willBalance && (s.nodeBurn || s.hitFire || (g_x.burnByDamageTicks && s.dotCount >= g_x.dotTicks && chestSpeed < 2.0f));
+	const bool shocked = !airborne && !burning && g_x.shock && willBalance && (s.nodeShock || s.hitShock);
 	const bool thrown = !airborne && !burning && !shocked && g_x.explosion && !s.headGone && (s.knock ? s.knockState == 1 : (regionMul > 0.0f && chestSpeed > g_balanceMaxSpeed));
 	const bool gut = g_x.gutCurl && located && (hitPart == 0 || hitPart == 7 || hitPart == 8) && Rnd01() < g_x.gutCurlChance;
 	s.kind = airborne ? 4 : burning ? 1 : shocked ? 2 : thrown ? 3 : 0;
@@ -673,6 +710,7 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	if (!s.mode && s.hiddenMask && g_skipDismembered) { Log("observe[%u]: cut-off limb and the bodies cannot be driven, leaving the corpse to the game", s.id); return false; }
 	if (!s.mode) KeyframeGameBodies(s);
 	if (s.verbose) Log("observe[%u]: Delirium body started (pelvis %.2f m/s, chest %.2f m/s)", s.id, len(vel[0]), len(vel[10]));
+	if (s.verbose) { uint32_t rc = 0, rn = 0; Rd(s.actor + 0xAC, &rc, 4); if (rc) Rd(rc + 0x58, &rn, 4); Log("observe[%u]: the actor's ragdoll controller %08X (its node %08X, skeleton root %08X); game hit location %d, rig part hit %d", s.id, rc, rn, s.root, s.hitLoc, s.woundPart >= 0 ? s.woundPart : -1); }
 	if (s.verbose) Log("observe[%u]: start-up stages: world and ground mesh %.1f ms, agent %.1f ms, shot %.1f ms, drive set-up %.1f ms", s.id, s.stageMs[0], s.stageMs[1], s.stageMs[2], NowMs() - T3);
 	return true;
 }
@@ -734,7 +772,7 @@ static bool Step(Session& s) {
 		if (ls == 1 || ls == 2) { s.knock = false; if (s.verbose) Log("observe[%u]: the knocked-down actor died, carrying on as a death", s.id); }
 		else {
 			uint32_t pr = 0; uint8_t ks = 0xFF; Rd(s.actor + 0x68, &pr, 4); if (pr) Rd(pr + 0x13C, &ks, 1);
-			if (s.unconscious ? ls != 3 : (ls != 0 || ks < 1 || ks > 4)) { Log("observe[%u]: knockdown over (knock state %d, life state %u), the game takes the body back", s.id, (int)(signed char)ks, ls); if (s.mode == 1) StopDrive(s); return false; }
+			if (s.unconscious ? ls != s.unconState : (ls != 0 || ks < 1 || ks > 4)) { Log("observe[%u]: knockdown over (knock state %d, life state %u), the game takes the body back", s.id, (int)(signed char)ks, ls); if (s.mode == 1) StopDrive(s); return false; }
 		}
 	}
 	if (!s.knock && ++s.lifeCheck % 15 == 0 && g_requireDead) {                              // revived, reloaded or replaced by a living actor: stop touching it
@@ -875,26 +913,29 @@ static int ProcessActors(uint32_t* out, int cap) {
 	return n;
 }
 
-// Living actors knocked down (explosion, power attack, push): the process keeps a knock state byte (+0x13C): 1 explode, 3 knocked out. Actors that go
-// unconscious (life state 3) are caught when their life state changes. Every few frames the game's actor list is scanned.
+// Living actors knocked down (explosion, power attack, push): the process keeps a knock state byte (+0x13C): 1 explode, 3 knocked out. Actors that go down
+// unconscious (life state 3) or, being essential, "essential down" (6) are caught when their life state changes. Actors PushActorAway was just called for are looked at
+// every frame; the rest of the game's actor list is scanned every few frames.
+static void KnockCheck(uint32_t a, std::map<uint32_t, uint32_t>& lastLs) {
+	uint32_t vt = 0, ls = 0xFFFF, pr = 0;
+	if (!Rd(a, &vt, 4) || (vt != 0x1086A6C && vt != 0x10870AC) || !Rd(a + 0x108, &ls, 4)) return;
+	auto it = lastLs.find(a); const uint32_t prev = it == lastLs.end() ? 0xFFFE : it->second; lastLs[a] = ls;
+	for (Session* s : g_active) if (s->actor == a) return;
+	if (ls == 3 || ls == 6) { if (g_x.unconscious && prev != 3 && prev != 6 && prev != 0xFFFE) Begin(a, true, 3); return; }      // went down just now (not one found lying there)
+	if (ls != 0 || !g_x.knockdown || !Rd(a + 0x68, &pr, 4) || pr < 0x10000) return;
+	uint8_t ks = 0; if (!Rd(pr + 0x13C, &ks, 1) || (ks != 1 && ks != 3)) return;
+	Begin(a, true, (int)ks);
+}
 static void KnockWatch() {
 	if (!g_x.knockdown && !g_x.unconscious) return;
-	static unsigned tick = 0; if (++tick % 6) return;
-	static std::map<uint32_t, uint32_t> lastLs; static int said = 0;
+	static std::map<uint32_t, uint32_t> lastLs; static unsigned tick = 0; static int said = 0;
+	if (lastLs.size() > 800) lastLs.clear();
+	const DWORD now = GetTickCount();
+	for (LONG i = g_pushN > 16 ? g_pushN - 16 : 0; i < g_pushN; i++) if (now - (DWORD)g_pushTick[i & 15] < 3000) KnockCheck((uint32_t)g_pushActor[i & 15], lastLs);
+	if (++tick % 6) return;
 	uint32_t list[256]; const int n = ProcessActors(list, 256);
 	if (said < 3 && n > 0) { said++; Log("observe: scanning %d actors from the game's actor list", n); }
-	if (lastLs.size() > 800) lastLs.clear();
-	for (int k = 0; k < n; k++) {
-		const uint32_t a = list[k]; uint32_t vt = 0, ls = 0xFFFF, pr = 0;
-		if (!Rd(a, &vt, 4) || (vt != 0x1086A6C && vt != 0x10870AC) || !Rd(a + 0x108, &ls, 4)) continue;
-		auto it = lastLs.find(a); const uint32_t prev = it == lastLs.end() ? 0xFFFE : it->second; lastLs[a] = ls;
-		bool busy = false; for (Session* s : g_active) if (s->actor == a) { busy = true; break; }
-		if (busy) continue;
-		if (ls == 3) { if (g_x.unconscious && prev != 3 && prev != 0xFFFE) Begin(a, true, 3); continue; }     // went unconscious just now (not one found lying there)
-		if (ls != 0 || !g_x.knockdown || !Rd(a + 0x68, &pr, 4) || pr < 0x10000) continue;
-		uint8_t ks = 0; if (!Rd(pr + 0x13C, &ks, 1) || (ks != 1 && ks != 3)) continue;
-		Begin(a, true, (int)ks);
-	}
+	for (int k = 0; k < n; k++) KnockCheck(list[k], lastLs);
 }
 
 // The player: log what the game does when the player dies, and start Delirium from the life state when no kill burst was seen.

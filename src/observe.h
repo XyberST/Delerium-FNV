@@ -3,7 +3,7 @@
 #pragma once
 #include "engine.h"
 #include <cstdint>
-enum ProbeRole { kRoleNone = 0, kRoleDamage = 1, kRoleMotionType = 2, kRolePick = 3, kRoleWorld = 4 };
+enum ProbeRole { kRoleNone = 0, kRoleDamage = 1, kRoleMotionType = 2, kRolePick = 3, kRoleWorld = 4, kRolePush = 5 };
 void ObserveInit(EngineApi* api, void* fitBuild, const char* dir);   // fitBuild may be null (engine missing)
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack);
 void ObserveTick();
@@ -58,6 +58,9 @@ struct ExtraCfg {
 	bool creatures = true;               // actors of the Creature class (ghouls, mutants, ...) may get Delirium
 	bool largeActors = true;             // actors much bigger than a human (super mutants) may get Delirium: the rig was made for a human skeleton
 	float largeScale = 1.2f;             // leg bone length relative to the player's above which an actor counts as large
+	bool hitData = true;                 // read the game's hit data (hit location, weapon) when an actor is damaged
+	char fireWeapons[160] = "";          // FormIDs (hex, comma separated) of weapons whose hits set an actor on fire; the log lists the weapon of every hit
+	char shockWeapons[160] = "";         // FormIDs of weapons whose hits electrocute
 	bool unconscious = true;             // actors the game has knocked unconscious (life state 3) get Delirium like knocked-out ones
 	float unconsciousAgonySeconds = 6.0f; // how long an unconscious actor keeps writhing before it lies limp and is handed back
 	bool stagger = true;                 // a shot actor staggers away from whoever shot it (direction taken from the attacker's position)

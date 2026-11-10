@@ -1,0 +1,59 @@
+; DeliriumFNV reaction scripts
+; ===========================
+; Everything in here is optional. A [Block] that exists below REPLACES the built-in reaction of that name; a block that is missing leaves the built-in
+; one alone. Edit, save, press F10 in game (the key in the ini), and the next ragdoll uses it. Mistakes are listed in DeliriumFNV.log under "script:".
+;
+; BLOCKS (the reaction they replace)
+;   [Explosion]   an actor thrown by a blast (or knocked down with state 1)
+;   [Fall]        an actor falling from a height
+;   [Burn]        a burning actor (runs next to the stagger set by BurnBalanceSeconds)
+;   [Shock]       an electrocuted actor
+;   [Gut]         a gut shot that makes the actor curl up
+;   [Agony]       one spell of fumbling on the floor of a knocked-down or unconscious actor; it repeats until the game gets the actor up.
+;                 [AgonyLeg] is used instead for leg wounds and [AgonyGut] for gut, arm and head wounds (WoundAgony=1), when they exist.
+;   Several blocks of one name with a number after it ([Agony], [Agony2], [Agony3]) are picked from at random, one per time the reaction starts.
+;
+; LINES (one message per line, ; starts a comment)
+;   time  message  key=value key=value ...
+;     time     seconds after the reaction starts, or an expression: 1.5   $fall+0.8   $balance+0.3   $explosion   $burn   $shock   $gut
+;              $fall = seconds until the actor lands, $balance = how long it keeps its feet while dying, the others are the lengths set in the ini.
+;     message  any engine message, see DeliriumFNV_messages.txt (not case sensitive), or one of the built-in actions:
+;              @windmill @writhe @writheupper @pedal @curl @rollup @explosion @highfall @catchfall @stop  (and @next: start the next spell, [Agony] only)
+;     values   numbers (1.5), true/false, text (fb), x,y,z for vectors, and low..high for a random number each time (8..12)
+;   import  Task/State  [time]
+;     reads the messages of one state of a GTA V physicstasks.ymt (see Ymt= in the ini) and keeps the ones the Delirium engine understands.
+;     Examples: CTaskNMHighFall/Start   CTaskNMHighFall/HighHighFallStart   CTaskNMOnFire/Start   CTaskNMExplosion/StartWindmill
+;               CTaskNMElectrocute/Start   CTaskNMInjuredOnGround/Start   CTaskNMShot/ParamSets/LegShot   CTaskNMFlinch/Passive
+;     The log says how many messages were kept and which were skipped. A path part can pick the n-th of several equal ones: WeaponSets/sets/Item#2
+;
+; Nothing below is switched on. Remove the leading ; of a block to try it.
+
+; --- a fall that uses the GTA V high-fall messages, then lets go when it lands ----------------------------------------------------------------------
+;[Fall]
+;import CTaskNMHighFall/HighHighFallStart
+;$fall+0.8  @stop
+
+; --- the built-in explosion reaction written out: curl and pedal ---------------------------------------------------------------------------------
+;[Explosion]
+;0.0   stopAllBehaviours
+;0.0   @pedal
+;0.0   @rollup
+;$explosion  @stop
+
+; --- a different agony: slow writhing with a random length, then a pause ------------------------------------------------------------------------
+;[Agony]
+;0.0   stopAllBehaviours
+;0.05  bodyWrithe start=true armStiffness=9..13 legStiffness=9..13 backStiffness=9..13 armAmplitude=0.8 legAmplitude=0.8 mask=fb rollOverFlag=true
+;0.05  @pedal
+;3.0   @stop
+;
+;[Agony2]
+;0.0   stopAllBehaviours
+;0.05  @curl
+;2.5   @stop
+
+; --- leg wounds: only the arms struggle ------------------------------------------------------------------------------------------------------------
+;[AgonyLeg]
+;0.0   stopAllBehaviours
+;0.05  @writheupper
+;3.0   @stop

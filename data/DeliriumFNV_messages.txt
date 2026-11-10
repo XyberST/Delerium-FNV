@@ -1,0 +1,418 @@
+DeliriumFNV: ragdoll messages you can use in DeliriumFNV_reactions.txt
+==============================================================================
+
+Every message the Delirium engine understands and the parameters each takes.
+Kinds: float = number, int = whole number, bool = true/false, vec3 = x,y,z (three numbers joined by commas), text = a word such as fb or lb.
+Names are not case sensitive in the script file. A parameter you leave out keeps the engine's own default. Parameters marked (unused) are accepted by the engine but do nothing.
+
+Every message also takes start (bool): true switches its behaviour on, false switches it off again.
+Macros (the built-in reactions, tuned by the [Reactions] keys of the ini): @windmill @writhe @writheupper @pedal @curl @rollup @explosion @highfall @catchfall @stop
+
+activePose
+----------
+  mask                               text  
+
+applyImpulse
+------------
+  partIndex                          int   
+  hitPoint                           vec3  
+  impulse                            vec3  
+  equalizeAmount                     float 
+
+armsWindmillAdaptive
+--------------------
+  bodyStiffness                      float 
+  amplitude                          float 
+  phase                              float 
+  disableOnImpact                    bool   - +144 0x40: an arm stops once its hand hits something (init's true; the game never sends it).
+  period                             float 
+  armStiffness                       float 
+
+bodyBalance
+-----------
+  bodyStiffness                      float 
+  headLookAtVelProb                  float 
+  armsOutStraightenElbows            float 
+  bendElbowsTime                     float 
+  elbow                              float 
+  angVelMultiplier                   vec3   - angVelMultiplier and angVelThreshold, x y z.
+  angVelThreshold                    vec3  
+  returningToBalanceArmsOut          float 
+  somersaultAngleThreshold           float 
+  armsOutMinLean2                    float 
+  sideSomersaultAngleThreshold       float 
+  bendElbowsGait                     float 
+  armsOutOnPush                      bool  
+  elbowAngleOnContact                float 
+  bodyTurnTimeout                    float  - The upper body's ("ub") damping as the tick uses it.
+  turnOffProb                        float 
+  turn2VelProb                       float 
+  damping                            float 
+  headLookPos                        vec3  
+  sideSomersaultAngle                float 
+  headLookAlwaysTimeout              float  - The upper body's ("ub") stiffness as the tick uses it.
+  turnAwayProb                       float 
+  shoulder                           float 
+  turnRightProb                      float 
+  turnLeftProb                       float 
+  somersaultAngle                    float 
+  armsOutOnPushMultiplier            float 
+  turn2TargetProb                    float 
+  useBodyTurn                        bool  
+  useHeadLook                        bool  
+  headLookInstanceIndex              int   
+  armsOutOnPushTimeout               float 
+  maxSteps                           int   
+
+bodyFoetal
+----------
+  mask                               text   - +80: the effectors it may drive (the rest locked while it runs).
+  stiffness                          float  - +68 stiffness, +72 damping, +64 asymmetry, +60 the back's random twist, +76 the seed.
+  asymmetry                          float 
+  randomSeed                         int   
+  dampingFactor                      float 
+  backTwist                          float 
+
+bodyRelax
+---------
+  mask                               text  
+  holdPose                           bool  
+  relaxation                         float 
+  damping                            float 
+
+bodyRollUp
+----------
+  mask                               text  
+  stiffness                          float 
+  legPush                            float 
+  armReachAmount                     float 
+  useArmToSlowDown                   float 
+  asymmetricalLegs                   float 
+
+bodyWrithe
+----------
+  armStiffness                       float 
+  legStiffness                       float 
+  legPeriod                          float 
+  elbowAmplitude                     float 
+  legAmplitude                       float 
+  kneeAmplitude                      float 
+  backDamping                        float 
+  backPeriod                         float 
+  rollOverFlag                       bool  
+  backAmplitude                      float 
+  backStiffness                      float 
+  armDamping                         float 
+  legDamping                         float 
+  mask                               text  
+  armAmplitude                       float 
+  armPeriod                          float 
+
+braceForImpact
+--------------
+  bodyStiffness                      float  - +20 bodyStiffness, +24 pos, +36 instanceIndex, +40 braceDistance, +44 targetPredictionTime, +48 reachAbsorbtionTime, +52 look, +64 grabStrength, +68 grabDistance, +72 grabReachAngle, +76 grabHoldTimer, +80 the car's top speed to grab (hash unnamed), +84 how long it braces at a target behind it (hash unnamed), +88 grabDontLetGo, +92 legStiffness.
+  look                               vec3  
+  grabReachAngle                     float 
+  grabHoldTimer                      float 
+  braceDistance                      float 
+  targetPredictionTime               float 
+  grabDistance                       float 
+  pos                                vec3  
+  reachAbsorbtionTime                float 
+  grabDontLetGo                      bool  
+  legStiffness                       float 
+  grabStrength                       float 
+  instanceIndex                      int   
+  hash_4f7c0f0b                      float 
+
+catchFall
+---------
+  useHeadLook                        bool  
+  armsStiffness                      float 
+  torsoStiffness                     float 
+  legsStiffness                      float 
+  forwardMaxArmOffset                float 
+  zAxisSpinReduction                 float 
+  backwardsMinArmOffset              float 
+
+configureBalance
+----------------
+  legStiffness                       float 
+  stepHeight                         float 
+  stepClampScale                     float 
+  balanceAbortThreshold              float 
+  taperKneeStrength                  bool   - DBM+0xBFC bit 0x10: on from init; the game never sends it, but highFall clears it for good.
+
+configureBalanceReset
+---------------------
+  (no parameters)
+
+defineAttachedObject
+--------------------
+  partIndex                          int   
+  worldPos                           vec3  
+  objectMass                         float 
+
+electrocute
+-----------
+  stunMag                            float  - each jolt's kick, m/s on each part (0.25)
+  initialMult                        float  - the first jolts' multiplier (1)
+  largeMult                          float  - the big jolts' multiplier (1)
+  largeMinTime                       float  - s between big jolts, at least (1)
+  largeMaxTime                       float  - at most (2)
+  movingMult                         float  - jolts times this while he moves (1)
+  balancingMult                      float  - while he stands still (1)
+  airborneMult                       float  - off the ground (1)
+  movingThresh                       float  - m/s above which he's moving (1)
+  stunInterval                       float  - s between jolts (0.07)
+  directionRandomness                float  - 0: each jolt reverses the last, 1: all random (0.5)
+  hipType                            int    - 0: no pelvis jolt, 1: the pelvis jolts too (0)
+  leftLeg                            bool   - (true)
+  rightLeg                           bool   - (true)
+  leftArm                            bool   - (true)
+  rightArm                           bool   - (true)
+  spine                              bool   - (true)
+  neck                               bool   - (true)
+  phasedLegs                         bool   - the legs take turns (false)
+  applyStiffness                     bool   - stiff (12) while shocked (true)
+  useTorques                         bool   - twist the parts, not push them (true)
+
+fallOverWall
+------------
+  bodyTwist                          float 
+  useSpecifiedPoint                  bool  
+  maxDistanceFromPelToHitPoint       float 
+  fallOverEdge                       vec3  
+  fallOverPoint                      vec3   - +32 fallOverPoint, +48 fallOverEdge, +64 damping, +68 bodyStiffness, +72 magOfForce, +76 the time it pushes (1, no message field), +80 how far it tips before it's done (-0.2, none), +84 maxDistanceFromPelToHitPoint, +88 / +92 the twist's range (bodyTwist x 45 / x 85, clamped 0..1), +96 useSpecifiedPoint.
+  magOfForce                         float 
+  bodyStiffness                      float 
+  damping                            float 
+
+grab
+----
+  instanceIndex                      int    - the obstacle (a step's car box, by its id) the points, normals and grips are in the frame of; -1 the world
+  bodyStiffness                      float 
+  armStiffness                       float 
+  grabStrength                       float  - +132 grabStrength, +136 armStiffness, +140 grabDist, +144 reachAngle, +148 oneSideReachAngle, +152 bodyStiffness, +156 pullUpTime, +160 / +164 pullUpStrengthLeft / Right, +168 grabHoldMaxTimer; +0x124 reachDistance (hash 0x34629c68): how far the arm reaches out when moving slowly; +0x128 the arm's stiffness while held (4, no message field).
+  useLeft                            bool  
+  normalR                            vec3  
+  pos3                               vec3  
+  useRight                           bool  
+  pos1                               vec3  
+  pos2                               vec3  
+  pos4                               vec3  
+  surfaceGrab                        bool  
+  oneSideReachAngle                  float 
+  normalL                            vec3  
+  instancePartIndex                  int    - +300: from 1, that child of the obstacle's composite (its frame, ) instead of the obstacle's
+  linegrab                           bool  
+  grabDist                           float 
+  dontLetGo                          bool  
+  justbrace                          bool   - +20 justbrace, +21 linegrab, +22 surfaceGrab, +23 useRight, +24 useLeft, +25 dontLetGo.
+  reachAngle                         float 
+  pullUpStrengthRight                float 
+  pullUpTime                         float 
+  pullUpStrengthLeft                 float 
+  grabHoldMaxTimer                   float 
+  reachDistance                      float 
+
+hardConstraint
+--------------
+  partIndex                          text   - the parts held, e.g. 16,20 (none)
+  constrainOrientation               text   - per part 1/0: hold its turn (all 1)
+  constrainTranslation               text   - per part 1/0: hold its place (all 1)
+  blendWithPreviousFrame             text   - per part 1/0: half last frame's target (all 0)
+  applyTeleporation                  bool   - put the parts on their targets at the start (false)
+  stabiliseHead                      bool   - hold the head's turn too (false)
+  telportedVelOnDeactivation         bool   - let go moving as the target was (false)
+
+headLook
+--------
+  instanceIndex                      int    (unused) - a game object index (the SDK has no level objects: positions are world coordinates)
+  pos                                vec3  
+  stiffness                          float 
+  alwaysEyesHorizontal               bool  
+  alwaysLook                         bool  
+  vel                                vec3  
+  damping                            float 
+
+highFall
+--------
+  bodyStiffness                      float  - +20 bodyStiffness, +24 bodydamping, +28 catchfalltime, +32 crashOrLandCutOff (landCutOffVelocity lands here too), +36 pdStrength, +40 catchFallCutOff, +44 armsUp, +48 legRadius, +52 legAngSpeed, +56 armPeriod, +60 armAmplitude, +64 aimAngleBase, +68 fowardVelRotation, +72 footVelCompScale, +76 legL, +80 sideD, +84 fowardOffsetOfLegIK, +88 fowardVelCutOff, +92 legStrength, +96 orientateBodyToFallDirection, +97 fowardRoll, +98 the zero pose rolling (hash 0xf411b4e7, unnamed), +99 ignorWorldCollisions. (useZeroPose is in the handler's table but stored nowhere.)
+  armAmplitude                       float 
+  armPeriod                          float 
+  pdStrength                         float 
+  useZeroPose                        bool   (unused) - the game handler stores it nowhere
+  armsUp                             float 
+  legRadius                          float 
+  bodydamping                        float 
+  legAngSpeed                        float 
+  crashOrLandCutOff                  float 
+  fowardOffsetOfLegIK                float 
+  catchfalltime                      float 
+  landCutOffVelocity                 float 
+  ignorWorldCollisions               bool  
+  fowardRoll                         bool  
+  orientateBodyToFallDirection       bool  
+  aimAngleBase                       float 
+  fowardVelRotation                  float 
+  sideD                              float 
+  catchFallCutOff                    float 
+  footVelCompScale                   float 
+  legL                               float 
+  fowardVelCutOff                    float 
+  legStrength                        float 
+  zeroPoseRoll                       bool  
+
+incomingTransforms
+------------------
+  (no parameters)
+
+injury
+------
+  part                               int    - the part hit: its arm or leg is hurt (a trunk or head part: none) (-1)
+  mask                               text   - or these joints, e.g. ur (none)
+  amount                             float  - how hurt, 0..1; 0 heals (0.5)
+
+leanInDirection
+---------------
+  leanAmount                         float 
+  applyAsForce                       bool  
+  dir                                vec3  
+
+leanToPosition
+--------------
+  leanAmount                         float 
+  applyAsForce                       bool  
+  pos                                vec3  
+
+leanTowardsObject
+-----------------
+  instanceIndex                      int    (unused) - a game object index (the SDK has no level objects: positions are world coordinates)
+  leanAmount                         float 
+  applyAsForce                       bool  
+  offset                             vec3  
+
+pedalLegs
+---------
+  legStiffness                       float 
+  pedalRightLeg                      bool  
+  speedAsymmetry                     float 
+  pedalLeftLeg                       bool  
+  radius                             float 
+  angularSpeed                       float 
+  pedalOffset                        float 
+  angSpeedMultiplier4Dragging        float 
+  adaptivePedal4Dragging             bool  
+  backPedal                          bool  
+  radiusVariance                     float 
+  centreUp                           float 
+  centreForwards                     float 
+  legAngleVariance                   float 
+  randomSeed                         int   
+
+pointArm
+--------
+  instanceIndex                      int   
+  useLeftArm                         bool  
+  twist                              float 
+  target                             vec3   - +32 target, +48 twist, +52 armStraightness, +56 armStiffness, +60 armDamping, +64 instanceIndex, +68 pointSwingLimit, +72 useLeftArm, +73 useZeroPoseWhenNotPointing.
+  pointSwingLimit                    float 
+  armStraightness                    float 
+  useZeroPoseWhenNotPointing         bool  
+  armDamping                         float 
+  armStiffness                       float 
+
+rollDownStairs
+--------------
+  forcemag                           float 
+  armReachLength                     float 
+  m_legPush                          float 
+  useCustomRollDir                   bool  
+  stiffnessDecayTarget               float 
+  spinWhenInAir                      bool  
+  m_armReachAmount                   float 
+  customRollDir                      vec3  
+  stiffnessDecayTime                 float 
+  m_useArmToSlowDown                 float 
+  stiffness                          float  - The message's: +20 stiffness, +24 damping, +28 forcemag, +32 asymmetry, +36 asymmetricalLegs, +40 m_useArmToSlowDown, +44 m_armReachAmount, +48 useZeroPose, +49 spinWhenInAir, +52 m_legPush, +60 armReachLength, +64 stiffnessDecayTime, +68 stiffnessDecayTarget, +72 useCustomRollDir, +76 zAxisSpinReduction, +80 customRollDir.
+  damping                            float 
+  useZeroPose                        bool  
+  zAxisSpinReduction                 float 
+  asymmetricalLegs                   float 
+  asymmetry                          float 
+
+setStiffness
+------------
+  bodyStiffness                      float 
+  mask                               text  
+  damping                            float 
+
+shot
+----
+  bodyStiffness                      float 
+  grabHoldTime                       float 
+  bodyPart                           int   
+  loosenessAmount                    float 
+  shockSpinDecayMult                 float 
+  timeBeforeReachForWound            float 
+  headLookAtWoundMaxTimer            float 
+  reachForWound                      bool  
+  spinePainTwistMultiplier           float 
+  useHeadLook                        bool  
+  shockSpinMin                       float 
+  stableHandsAndNeck                 bool  
+  maxSteps                           int   
+  shockSpinMax                       float 
+  timeBeforeCollapseWoundLeg         float 
+  melee                              bool  
+  shockSpinScalePerComponent         float 
+  randomizeShockSpinDirection        bool  
+  useCatchFallOnFall                 bool  
+  crouching                          bool  
+  headLookAtWoundMinTimer            float 
+  hitPoint                           vec3  
+  shockSpinLiftForceMult             float 
+  chickenArms                        bool  
+  fling                              bool  
+  normal                             vec3  
+  spinePainTime                      float 
+  headLookAtHeadPosMinTimer          float 
+  bulletVel                          vec3  
+  addShockSpin                       bool  
+  spinePainMultiplier                float 
+  headLookAtHeadPosMaxTimer          float 
+  alwaysAddShockSpin                 bool  
+  flingWidth                         float  - +0x64 flingWidth: fling's clavicle lift.
+  headLook                           vec3   - +16 headLook: the point useHeadLook looks at.
+
+shotRelax
+---------
+  relaxPeriod                        float 
+
+stayUpright
+-----------
+  stiffness                          float 
+  dampingScale                       float 
+
+stopAllBehaviours
+-----------------
+  (no parameters)
+
+upperBodyFlinch
+---------------
+  handDistanceFrontBack              float 
+  noiseScale                         float 
+  handDistanceVertical               float 
+  useRightArm                        bool  
+  handDistanceLeftRight              float 
+  rightHanded                        bool  
+  turnTowards                        int   
+  backBendAmount                     float 
+  newHit                             bool   - +68: restart the flinch's timing; set only when sent (else the behaviour's own stands).
+  leftHanded                         bool   - +32 / +33: stored, read by nothing sends one of them, a coin flip; both arms still flinch).
+  bodyDamping                        float 
+  useLeftArm                         bool   - +61 / +60: the arms that flinch.
+  pos                                vec3  
+  bodyStiffness                      float 
+

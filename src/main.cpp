@@ -4,6 +4,7 @@
 #include "probe.h"
 #include "engine.h"
 #include "ingame.h"
+#include "script.h"
 #include "observe.h"
 #include <windows.h>
 #include <shlobj.h>
@@ -43,7 +44,10 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
 
 static std::string g_iniPath;
 static void ReloadSettings();
+static std::string InPluginDir(const char* n) { std::string s = n; if (s.size() > 1 && (s[1] == ':' || s[0] == '\\')) return s; return g_pluginDir + "\\" + s; }
 static void ApplyIni(const std::string& ini) {
+	{ char fn[260], ym[260]; GetPrivateProfileStringA("Scripts", "File", "DeliriumFNV_reactions.txt", fn, sizeof fn, ini.c_str()); GetPrivateProfileStringA("Scripts", "Ymt", "physicstasks.ymt", ym, sizeof ym, ini.c_str());
+	  if (GetPrivateProfileIntA("Scripts", "Enabled", 1, ini.c_str())) ScriptLoad(InPluginDir(fn), InPluginDir(ym)); else ScriptClear(); }
 	ObserveSetDrive(GetPrivateProfileIntA("General", "Drive", 1, ini.c_str()) != 0);
 	ObserveSetRequireDead(GetPrivateProfileIntA("General", "RequireDead", 1, ini.c_str()) != 0);
 	char b[32]; GetPrivateProfileStringA("General", "SimSeconds", "8", b, sizeof b, ini.c_str()); float sim = (float)atof(b);
@@ -111,7 +115,7 @@ __declspec(dllexport) bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInf
 __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	PickLogDir();
 	LogOpen((g_logDir + "\\DeliriumFNV.log").c_str());
-	Log("DeliriumFNV 0.19 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
+	Log("DeliriumFNV 0.20 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
 	IngameInit(const_cast<NVSEInterface*>(nvse));
 	std::string ini = g_pluginDir + "\\DeliriumFNV.ini";
 	if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) ini = g_root + "\\DeliriumFNV.ini";   // also accept the ini beside the dll

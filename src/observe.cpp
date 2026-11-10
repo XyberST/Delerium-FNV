@@ -10,6 +10,7 @@
 #include "pick.h"
 #include "ground.h"
 #include "log.h"
+#include "script.h"
 #include <windows.h>
 #include <algorithm>
 #include <cstring>
@@ -111,6 +112,7 @@ struct Session {
 	float balanceT = 0, balanceFor = 0; bool relaxed = false;
 	float simTime = 0, simAcc = 0, calmT = 0, rt = 0, floorDrop = 0; int kind = 0;             // simulated seconds; step accumulator; calm time; reaction clock; metres to the floor if airborne; 0 normal 1 burn 2 shock 3 thrown 4 fall
 	bool nodeBurn = false, nodeShock = false; int dotCount = 0; float lastFastest = 0;
+	std::vector<ScriptMsg> smsgs;                                // messages from reaction scripts this session uses (timeline value = index)
 	struct TA { float t; int a; float v; }; std::vector<TA> tl; size_t tlNext = 0;               // scripted reactions: (time, action, value)
 	double costSum = 0, costMax = 0, beginMs = 0, startMs = 0; unsigned costN = 0;
 	unsigned hiddenMask = 0; bool headGone = false, legGone = false, balancing = false;   // rig parts whose bones are scaled away (cut off); head among them; trying to stay on its feet
@@ -450,7 +452,7 @@ static const char* PartName(int part) {
 	return part >= 0 && part < 21 ? n[part] : "?";
 }
 // ---- scripted reactions on top of the engine's shot behaviour: flailing, curling, bracing (all parameters from the ini)
-enum { A_WINDMILL_ON = 1, A_WRITHE_FULL, A_WRITHE_UPPER, A_PEDAL_ON, A_CURL_ON, A_ROLLUP_ON, A_EXPLOSION, A_HIGHFALL_ON, A_CATCHFALL_ON, A_STOP_ALL, A_AGONY_NEXT };
+enum { A_WINDMILL_ON = 1, A_WRITHE_FULL, A_WRITHE_UPPER, A_PEDAL_ON, A_CURL_ON, A_ROLLUP_ON, A_EXPLOSION, A_HIGHFALL_ON, A_CATCHFALL_ON, A_STOP_ALL, A_AGONY_NEXT, A_SCRIPT };
 static float Rnd01() { static unsigned seed = GetTickCount() * 2654435761u; seed = seed * 1664525u + 1013904223u; return (float)(seed >> 8) / 16777216.0f; }
 struct MsgB {                                                                                  // one engine message: begin, parameters, send
 	Session& s; MsgB(Session& s_, const char* n) : s(s_) { g_api->nm_msg_begin(s.agent, n); }
@@ -459,9 +461,65 @@ struct MsgB {                                                                   
 	MsgB& t(const char* k, const char* v) { g_api->nm_msg_set_string(s.agent, k, v); return *this; }
 	void send() { g_api->nm_msg_send(s.agent, s.world); }
 };
+
+// ------------------------------------------------------------------------------------------------------------------------------ reaction scripts
+// DeliriumFNV_reactions.txt can replace a built-in reaction (Explosion, Fall, Burn, Shock, Gut, Agony) by a list of timed engine messages.
+struct TimeVars { float fall = 0, balance = 0, explosion = 0, burn = 0, shock = 0, gut = 0; };
+static int MacroId(const std::string& n) {
+	static const struct { const char* n; int id; } k[] = { { "@windmill", A_WINDMILL_ON }, { "@writhe", A_WRITHE_FULL }, { "@writheupper", A_WRITHE_UPPER }, { "@pedal", A_PEDAL_ON }, { "@curl", A_CURL_ON }, { "@rollup", A_ROLLUP_ON },
+		{ "@explosion", A_EXPLOSION }, { "@highfall", A_HIGHFALL_ON }, { "@catchfall", A_CATCHFALL_ON }, { "@stop", A_STOP_ALL }, { "@next", A_AGONY_NEXT } };
+	for (const auto& e : k) if (n == e.n) return e.id;
+	return 0;
+}
+static float EvalTime(const std::string& e, const TimeVars& v) {                              // 1.5, $fall, $balance+0.3
+	float total = 0, sign = 1; size_t i = 0;
+	while (i < e.size()) {
+		const char c = e[i];
+		if (c == '+') { sign = 1; i++; } else if (c == '-') { sign = -1; i++; } else if (isspace((unsigned char)c)) i++;
+		else if (c == '$') {
+			size_t j = i + 1; while (j < e.size() && isalpha((unsigned char)e[j])) j++;
+			std::string n = e.substr(i + 1, j - i - 1); for (auto& ch : n) ch = (char)tolower((unsigned char)ch);
+			const float val = n == "fall" ? v.fall : n == "balance" ? v.balance : n == "explosion" ? v.explosion : n == "burn" ? v.burn : n == "shock" ? v.shock : n == "gut" ? v.gut : 0.0f;
+			total += sign * val; sign = 1; i = j;
+		} else { char* end = nullptr; const float val = (float)strtod(e.c_str() + i, &end); if (end == e.c_str() + i) break; total += sign * val; sign = 1; i = (size_t)(end - e.c_str()); }
+	}
+	return total;
+}
+static void SendScriptMsg(Session& s, const ScriptMsg& m) {
+	if (m.macro || !s.agent) return;
+	g_api->nm_msg_begin(s.agent, m.name.c_str());
+	for (const auto& p : m.p) {
+		const float val = p.rnd ? p.f + (p.f2 - p.f) * Rnd01() : p.f;
+		switch (p.kind) {
+		case 'f': g_api->nm_msg_set_float(s.agent, p.name.c_str(), val); break;
+		case 'i': g_api->nm_msg_set_int(s.agent, p.name.c_str(), (int)std::lround(val)); break;
+		case 'b': g_api->nm_msg_set_bool(s.agent, p.name.c_str(), p.b); break;
+		case 'v': g_api->nm_msg_set_vec3(s.agent, p.name.c_str(), p.v); break;
+		default: g_api->nm_msg_set_string(s.agent, p.name.c_str(), p.s.c_str()); break;
+		}
+	}
+	if (g_api->nm_msg_send(s.agent, s.world) < 0) { static int bad = 0; if (bad++ < 12) { char e[256] = ""; g_api->nm_last_error(e, sizeof e); Log("script: message '%s' was refused by the engine: %s", m.name.c_str(), e); } }
+}
+// Puts the messages of a [base] block (or one of base2, base3 ... picked at random) on the timeline starting at t0. False when no such block exists.
+static bool ApplyScript(Session& s, const char* base, float t0, const TimeVars& v, float* endT = nullptr, bool* hasNext = nullptr) {
+	const auto blocks = ScriptBlocks(base); if (blocks.empty()) return false;
+	const ScriptBlock* b = blocks[std::min(blocks.size() - 1, (size_t)(Rnd01() * (float)blocks.size()))];
+	const size_t first = s.tl.size(); float last = t0; bool nxt = false;
+	for (const auto& m : b->msgs) {
+		const float t = t0 + EvalTime(m.tx, v); last = std::max(last, t);
+		if (m.macro) { const int id = MacroId(m.name); if (!id) { static int bad = 0; if (bad++ < 6) Log("script: unknown macro %s in [%s]", m.name.c_str(), b->name.c_str()); continue; } if (id == A_AGONY_NEXT) nxt = true; s.tl.push_back({ t, id, 0.0f }); }
+		else { s.smsgs.push_back(m); s.tl.push_back({ t, A_SCRIPT, (float)(s.smsgs.size() - 1) }); }
+	}
+	std::stable_sort(s.tl.begin() + (long)first, s.tl.end(), [](const Session::TA& a, const Session::TA& c) { return a.t < c.t; });
+	if (endT) *endT = last; if (hasNext) *hasNext = nxt;
+	return true;
+}
 // A knocked-down actor keeps fumbling on the floor until the game gets it up: cycles of writhing, pedalling and curling with short limp pauses.
 static void ScheduleAgony(Session& s) {
 	if (s.unconscious && s.rt > g_x.unconsciousAgonySeconds) return;                       // an unconscious actor stops writhing after a while and lies limp
+	{ const char* base = "Agony"; if (g_x.woundAgony && s.woundPart >= 0) { const char* wb = (s.woundPart >= 1 && s.woundPart <= 6) ? "AgonyLeg" : "AgonyGut"; if (!ScriptBlocks(wb).empty()) base = wb; }
+	  float endT = 0; bool nxt = false; TimeVars tv;
+	  if (ApplyScript(s, base, s.rt, tv, &endT, &nxt)) { if (!nxt) s.tl.push_back({ endT + g_x.knockAgonyPause * (0.6f + 0.8f * Rnd01()), A_AGONY_NEXT, 0.0f }); return; } }
 	const float t = s.rt, len = std::max(1.5f, g_x.knockAgonySeconds * (0.7f + 0.6f * Rnd01()));
 	float r = Rnd01();
 	if (g_x.woundAgony && s.woundPart >= 0) { const int w = s.woundPart; const bool leg = w >= 1 && w <= 6; r = leg ? r * 0.7f : 0.3f + r * 0.7f; }   // a leg shot writhes and pedals; a gut, arm or head shot curls up around the wound
@@ -493,6 +551,7 @@ static void DoAct(Session& s, int a, float v) {
 	case A_CATCHFALL_ON: MsgB(s, "stopAllBehaviours").send(); g_api->nm_agent_task_catch_fall(s.agent, nullptr); break;
 	case A_STOP_ALL: MsgB(s, "stopAllBehaviours").send(); break;
 	case A_AGONY_NEXT: ScheduleAgony(s); break;
+	case A_SCRIPT: if ((size_t)v < s.smsgs.size()) SendScriptMsg(s, s.smsgs[(size_t)v]); break;
 	}
 }
 
@@ -569,14 +628,20 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	if (s.kind == 4) {                                                                         // falling: arms flail, legs pedal, then brace for the landing
 		skipShot = true; s.balancing = false; s.relaxed = true;
 		const float T = std::sqrt(2.0f * s.floorDrop / 9.81f);
-		s.tl.push_back({ 0.0f, A_HIGHFALL_ON, 0 });
-		if (Rnd01() < g_x.fallCatchChance) s.tl.push_back({ std::max(0.1f, T - 0.3f), A_CATCHFALL_ON, 0 });
-		s.tl.push_back({ T + 0.8f, A_STOP_ALL, 0 });
+		TimeVars tv; tv.fall = T;
+		if (!ApplyScript(s, "Fall", 0.0f, tv)) {
+			s.tl.push_back({ 0.0f, A_HIGHFALL_ON, 0 });
+			if (Rnd01() < g_x.fallCatchChance) s.tl.push_back({ std::max(0.1f, T - 0.3f), A_CATCHFALL_ON, 0 });
+			s.tl.push_back({ T + 0.8f, A_STOP_ALL, 0 });
+		}
 		Log("observe[%u]: reaction: falling %.1f m", s.id, s.floorDrop);
 	} else if (s.kind == 3) {                                                                  // thrown by a blast: windmill, pedal or writhe in the air
 		skipShot = true; s.balancing = false; s.relaxed = true;
-		s.tl.push_back({ 0.0f, A_EXPLOSION, 0 });
-		s.tl.push_back({ g_x.explosionSeconds * (0.8f + 0.4f * rr), A_STOP_ALL, 0 });
+		TimeVars tv; tv.explosion = g_x.explosionSeconds * (0.8f + 0.4f * rr);
+		if (!ApplyScript(s, "Explosion", 0.0f, tv)) {
+			s.tl.push_back({ 0.0f, A_EXPLOSION, 0 });
+			s.tl.push_back({ tv.explosion, A_STOP_ALL, 0 });
+		}
 		if (s.verbose) Log("observe[%u]: reaction: thrown (chest speed %.1f m/s)", s.id, chestSpeed);
 	} else if (willBalance) {                                                                  // dying but not thrown: stay on its feet and stumble for a moment, then give up
 		s.balanceFor = g_balanceSeconds * (0.7f + 0.6f * rr) * regionMul; s.balanceT = 0; s.relaxed = false;
@@ -585,14 +650,17 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 		if (!g_balancePush) { dir[0] = dir[1] = dir[2] = 0.0f; }
 		if (s.kind == 1) {                                                                       // burning: arms windmill while it staggers, then it writhes on the ground
 			s.balanceFor = g_x.burnBalanceSeconds * (0.7f + 0.6f * rr); const float t = s.balanceFor + 0.05f;
-			s.tl.push_back({ 0.0f, A_WINDMILL_ON, 0 }); s.tl.push_back({ t, A_WRITHE_FULL, 0 }); s.tl.push_back({ t, A_PEDAL_ON, 0 }); s.tl.push_back({ t + g_x.burnFlailSeconds, A_STOP_ALL, 0 });
+			TimeVars tv; tv.balance = s.balanceFor; tv.burn = g_x.burnFlailSeconds;
+			if (!ApplyScript(s, "Burn", 0.0f, tv)) { s.tl.push_back({ 0.0f, A_WINDMILL_ON, 0 }); s.tl.push_back({ t, A_WRITHE_FULL, 0 }); s.tl.push_back({ t, A_PEDAL_ON, 0 }); s.tl.push_back({ t + g_x.burnFlailSeconds, A_STOP_ALL, 0 }); }
 			Log("observe[%u]: reaction: burning", s.id);
 		} else if (s.kind == 2) {                                                                // shocked: convulses
 			s.balanceFor = g_x.shockBalanceSeconds * (0.7f + 0.6f * rr); const float t = s.balanceFor + 0.05f;
-			s.tl.push_back({ 0.0f, A_WRITHE_UPPER, 0 }); s.tl.push_back({ t, A_WRITHE_FULL, 0 }); s.tl.push_back({ t + g_x.shockSeconds, A_STOP_ALL, 0 });
+			TimeVars tv; tv.balance = s.balanceFor; tv.shock = g_x.shockSeconds;
+			if (!ApplyScript(s, "Shock", 0.0f, tv)) { s.tl.push_back({ 0.0f, A_WRITHE_UPPER, 0 }); s.tl.push_back({ t, A_WRITHE_FULL, 0 }); s.tl.push_back({ t + g_x.shockSeconds, A_STOP_ALL, 0 }); }
 			Log("observe[%u]: reaction: shocked", s.id);
 		} else if (gut) {                                                                        // hit low in the body: it folds over and curls up as it goes down
-			s.tl.push_back({ s.balanceFor + 0.3f, A_CURL_ON, 0 }); s.tl.push_back({ s.balanceFor + g_x.gutCurlSeconds, A_STOP_ALL, 0 });
+			TimeVars tv; tv.balance = s.balanceFor; tv.gut = g_x.gutCurlSeconds;
+			if (!ApplyScript(s, "Gut", 0.0f, tv)) { s.tl.push_back({ s.balanceFor + 0.3f, A_CURL_ON, 0 }); s.tl.push_back({ s.balanceFor + g_x.gutCurlSeconds, A_STOP_ALL, 0 }); }
 			if (s.verbose) Log("observe[%u]: reaction: gut shot, will curl up", s.id);
 		}
 		if (s.verbose) Log("observe[%u]: balancing for about %.1f s (chest speed %.1f m/s)", s.id, s.balanceFor, chestSpeed);

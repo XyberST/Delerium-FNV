@@ -56,7 +56,7 @@ struct ExtraCfg {
 	bool knockAgony = true, knockOutAgony = true;   // a knocked-down actor keeps writhing, pedalling and curling on the floor until the game gets it up (knocked out too, unless KnockOutAgony=0)
 	float knockAgonySeconds = 3.0f, knockAgonyPause = 0.5f;   // length of one writhing spell, limp pause between spells
 	bool creatures = true;               // actors of the Creature class (ghouls, mutants, ...) may get Delirium
-	bool largeActors = false;            // actors much bigger than a human (super mutants) may get Delirium: the rig was made for a human skeleton
+	bool largeActors = true;             // actors much bigger than a human (super mutants) may get Delirium: the rig was made for a human skeleton
 	float largeScale = 1.2f;             // leg bone length relative to the player's above which an actor counts as large
 	bool unconscious = true;             // actors the game has knocked unconscious (life state 3) get Delirium like knocked-out ones
 	float unconsciousAgonySeconds = 6.0f; // how long an unconscious actor keeps writhing before it lies limp and is handed back
@@ -65,7 +65,7 @@ struct ExtraCfg {
 	bool lod = true;                     // far ragdolls are stepped at a lower rate
 	float lodNear = 900.0f, lodMid = 2200.0f, lodRateMid = 30.0f, lodRateFar = 20.0f;   // game units, steps per second
 	float frameBudgetMs = 2.5f;          // plugin time per frame it aims for; over it the step rates drop and new ragdolls are left to the game (0 = no limit)
-	int agentPool = 2;                   // agents built in advance while nothing is happening, so a kill does not cost a 30 ms hitch (0 = off)
+	float floorHalfMesh = 12.0f, floorHalfFlat = 20.0f;   // half size (metres) of the safety floor under the ground mesh / of the flat floor used without a mesh; the engine builds it from 2 triangles per square metre, so 100 cost ~30 ms
 	bool knockdown = true;               // living actors knocked down by the game (explosion blast, knocked out) get Delirium until the game starts getting them up
 	bool playerDeath = false;             // the player's own death ragdoll gets Delirium too (needs the PlayerCharacter[206] slot probe)
 	// reactions

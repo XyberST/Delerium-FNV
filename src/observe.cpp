@@ -56,7 +56,7 @@ void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 
 // ---- death detection (runs inside the probe thunks: tiny and lock-free) ----
 static volatile LONG g_dmgActor[64], g_dmgTick[64], g_dmgN, g_dmgAtk[64];
-static std::vector<NmAgent*> g_pool; static float g_lodScale = 1.0f; static double g_frameMs = 0;
+static std::map<uint32_t, DWORD> g_refusedLarge; static float g_lodScale = 1.0f; static double g_frameMs = 0;
 // Where the attacker of the latest hit on this actor stands (third argument of the damage slot), checked to be a real actor before it is believed.
 static bool AttackerPos(uint32_t victim, float out[3]) {
 	const DWORD now = GetTickCount(); LONG top = g_dmgN;
@@ -257,7 +257,7 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	if (ls0 == 3 && !g_x.unconscious) return;
 	if (uncon) { knock = true; knockState = 3; }
 	std::map<uint32_t, DWORD>& rmap = knock ? g_recentKnock : g_recent;
-	{ uint32_t avt = 0; Rd(actor, &avt, 4); if (avt == 0x10870AC && !g_x.creatures) return; }
+	{ uint32_t avt = 0; Rd(actor, &avt, 4); if (avt == 0x10870AC && !g_x.creatures) return; auto rf = g_refusedLarge.find(actor); if (rf != g_refusedLarge.end() && now - rf->second < 60000) return; }
 	auto rc = rmap.find(actor); if (rc != rmap.end() && now - rc->second < (knock ? 3000u : 90000u)) return;         // dying then dead fire two bursts
 	int sim = 0; for (Session* a : g_active) if (a->phase < 3) sim++;
 	if (sim >= g_maxActors) return;                                                        // only bodies still being simulated count against the limit
@@ -310,7 +310,7 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	{ const float ratio = BodyRatio(actor); static int said3 = 0;
 	  if (ratio > 0) {
 		if (said3++ < 40) Log("observe[%u]: actor %08X is %.2f times the player's leg length (%s)", s->id, actor, ratio, cvt == 0x10870AC ? "creature" : "character");
-		if (!g_x.largeActors && ratio > g_x.largeScale) { Log("observe[%u]: actor %08X is large (%.2f), left to the game (LargeActors=0)", s->id, actor, ratio); delete s; return; } } }
+		if (!g_x.largeActors && ratio > g_x.largeScale) { Log("observe[%u]: actor %08X is large (%.2f), left to the game (LargeActors=0)", s->id, actor, ratio); g_refusedLarge[actor] = now; delete s; return; } } }
 	if (g_skipDismembered) {                                                                // a cut-off limb is hidden by scaling its bone to nothing; only those actors are left to the game
 		s->hiddenMask = HiddenMask(*s); s->headGone = (s->hiddenMask & HeadMask()) != 0; s->legGone = (s->hiddenMask & LegMask()) != 0;
 		int hid = HiddenLimb(*s);
@@ -588,15 +588,15 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 		else {
 			std::vector<float> pos; std::vector<uint32_t> tri; float low = GroundMesh(*s.ground, 0.0f, pos, tri);
 			if (g_api->nm_world_add_mesh(s.world, pos.data(), (int)pos.size() / 3, tri.data(), (int)tri.size() / 3, nullptr) == 0) {
-				g_api->nm_world_add_floor(s.world, 0, 0, low - 0.02f, 100.0f); meshed = true;
+				g_api->nm_world_add_floor(s.world, 0, 0, low - 0.02f, g_x.floorHalfMesh); meshed = true;
 				if (s.verbose) Log("observe[%u]: ground mesh from %u/%d rays, lowest %.2f m, %d triangles", s.id, s.groundHits, total, low, (int)tri.size() / 3);
 			}
 		}
 		delete s.ground; s.ground = nullptr;
 	}
-	if (!meshed) g_api->nm_world_add_floor(s.world, 0, 0, s.floorDrop > 0 ? -s.floorDrop - 0.02f : 0.0f, 100.0f);
+	if (!meshed) g_api->nm_world_add_floor(s.world, 0, 0, s.floorDrop > 0 ? -s.floorDrop - 0.02f : 0.0f, g_x.floorHalfFlat);
 	const double T1 = NowMs();
-	if (!g_pool.empty()) { s.agent = g_pool.back(); g_pool.pop_back(); } else { const double c0 = NowMs(); s.agent = g_api->nm_agent_create(g_fit, zero, 0.0f, 0.3f); if (s.verbose) Log("observe[%u]: no agent in the pool, built one in %.1f ms", s.id, NowMs() - c0); }
+	s.agent = g_api->nm_agent_create(g_fit, zero, 0.0f, 0.3f);
 	if (!s.agent) return false;
 	g_api->nm_agent_set_mode(s.agent, NM_MODE_LEAD);
 	g_api->nm_agent_set_part_states(s.agent, st, 21); g_api->nm_agent_set_zero_pose(s.agent, zp, 21);
@@ -844,7 +844,7 @@ static bool Step(Session& s) {
 }
 
 void ObserveReset() {
-	g_recentKnock.clear();                                          // save load, new game, exit to menu: every actor pointer we hold becomes invalid
+	g_recentKnock.clear(); g_refusedLarge.clear();                                          // save load, new game, exit to menu: every actor pointer we hold becomes invalid
 	for (Session* s : g_active) { Free(s); delete s; }
 	if (!g_active.empty()) Log("observe: game state changed, released %u sessions", (unsigned)g_active.size());
 	g_active.clear(); g_recent.clear(); g_qr = g_qw; g_lastQ = 0; g_lastDmgActor = 0;
@@ -948,9 +948,5 @@ void ObserveTick() {
 		if (g_active.empty()) g_lodScale = 1.0f;
 		else if (g_frameMs > g_x.frameBudgetMs) g_lodScale = std::max(0.25f, g_lodScale * 0.95f);
 		else g_lodScale = std::min(1.0f, g_lodScale * 1.02f);
-	}
-	if (g_x.agentPool > 0 && g_api && g_fit && (int)g_pool.size() < g_x.agentPool && GetTickCount() - (DWORD)g_lastDmgTick > 2500) {   // build agents in advance while nothing is going on
-		static int made = 0; const float zero[3] = { 0, 0, 0 }; const double c0 = NowMs(); NmAgent* a = g_api->nm_agent_create(g_fit, zero, 0.0f, 0.3f);
-		if (a) { g_pool.push_back(a); if (made++ < 3) Log("pool: built an agent in advance in %.1f ms", NowMs() - c0); }
 	}
 }

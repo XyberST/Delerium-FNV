@@ -8,6 +8,7 @@
 ;   [Fall]        an actor falling from a height
 ;   [Burn]        a burning actor (runs next to the stagger set by BurnBalanceSeconds)
 ;   [Shock]       an electrocuted actor
+;   [Drown]       an actor that died in water ($fall = DrownSeconds)
 ;   [Gut]         a gut shot that makes the actor curl up
 ;   [Agony]       one spell of fumbling on the floor of a knocked-down or unconscious actor; it repeats until the game gets the actor up.
 ;                 [AgonyLeg] is used instead for leg wounds and [AgonyGut] for gut, arm and head wounds (WoundAgony=1), when they exist.
@@ -18,7 +19,7 @@
 ;     time     seconds after the reaction starts, or an expression: 1.5   $fall+0.8   $balance+0.3   $explosion   $burn   $shock   $gut
 ;              $fall = seconds until the actor lands, $balance = how long it keeps its feet while dying, the others are the lengths set in the ini.
 ;     message  any engine message, see DeliriumFNV_messages.txt (not case sensitive), or one of the built-in actions:
-;              @windmill @writhe @writheupper @pedal @curl @rollup @explosion @highfall @catchfall @stop  (and @next: start the next spell, [Agony] only)
+;              @windmill @writhe @writheupper @pedal @curl @rollup @fetal @holdgut @explosion @highfall @catchfall @stop  (and @next: start the next spell, [Agony] only)
 ;     values   numbers (1.5), true/false, text (fb), x,y,z for vectors, and low..high for a random number each time (8..12)
 ;   import  Task/State  [time]
 ;     reads the messages of one state of a GTA V physicstasks.ymt (see Ymt= in the ini) and keeps the ones the Delirium engine understands.

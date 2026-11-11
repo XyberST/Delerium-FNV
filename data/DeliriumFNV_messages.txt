@@ -6,7 +6,7 @@ Kinds: float = number, int = whole number, bool = true/false, vec3 = x,y,z (thre
 Names are not case sensitive in the script file. A parameter you leave out keeps the engine's own default. Parameters marked (unused) are accepted by the engine but do nothing.
 
 Every message also takes start (bool): true switches its behaviour on, false switches it off again.
-Macros (the built-in reactions, tuned by the [Reactions] keys of the ini): @windmill @writhe @writheupper @pedal @curl @rollup @explosion @highfall @catchfall @stop
+Macros (the built-in reactions, tuned by the [Reactions] keys of the ini): @windmill @writhe @writheupper @pedal @curl @rollup @fetal @holdgut @explosion @highfall @catchfall @stop
 
 activePose
 ----------

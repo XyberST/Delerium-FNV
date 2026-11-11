@@ -3,7 +3,7 @@
 #pragma once
 #include "engine.h"
 #include <cstdint>
-enum ProbeRole { kRoleNone = 0, kRoleDamage = 1, kRoleMotionType = 2, kRolePick = 3, kRoleWorld = 4, kRolePush = 5 };
+enum ProbeRole { kRoleNone = 0, kRoleDamage = 1, kRoleMotionType = 2, kRolePick = 3, kRoleWorld = 4, kRolePush = 5, kRoleImpulse = 6 };
 void ObserveInit(EngineApi* api, void* fitBuild, const char* dir);   // fitBuild may be null (engine missing)
 void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack);
 void ObserveTick();
@@ -58,6 +58,11 @@ struct ExtraCfg {
 	bool creatures = true;               // actors of the Creature class (ghouls, mutants, ...) may get Delirium
 	bool largeActors = true;             // actors much bigger than a human (super mutants) may get Delirium: the rig was made for a human skeleton
 	float largeScale = 1.2f;             // leg bone length relative to the player's above which an actor counts as large
+	float impulseAll = 1.0f, impulseBullet = 1.0f, impulseMelee = 1.0f, impulseExplosion = 3.0f, impulseKnock = 1.0f, impulseOther = 1.0f;   // multipliers on the motion the game gives a body when it dies or is knocked down
+	bool fetalAgony = true, holdGut = true;      // knocked-down / unconscious actors curl up, kick their legs and hold their gut
+	bool drown = true; float drownDepth = 0.9f, drownSeconds = 6.0f, drownBuoyancy = 0.92f, drownDrag = 2.0f;   // actors that die in water: depth of the feet below the surface (m), struggle time, how much of gravity the water cancels, drag
+	bool shotReact = true; float shotRapidWindow = 0.35f, shotExtend = 1.5f, shotMaxExtend = 4.0f, shotShorten = 0.35f, shotPush = 12.0f;   // shooting an actor that is dying on its feet
+	bool tapImpulses = true; float tapFeed = 1.0f, tapMin = 0.05f;   // impulses the game applies to a Delirium body (bullets, other mods) are fed into the simulation
 	bool hitData = true;                 // read the game's hit data (hit location, weapon) when an actor is damaged
 	char fireWeapons[160] = "";          // FormIDs (hex, comma separated) of weapons whose hits set an actor on fire; the log lists the weapon of every hit
 	char shockWeapons[160] = "";         // FormIDs of weapons whose hits electrocute
@@ -70,7 +75,7 @@ struct ExtraCfg {
 	float frameBudgetMs = 2.5f;          // plugin time per frame it aims for; over it the step rates drop and new ragdolls are left to the game (0 = no limit)
 	float floorHalfMesh = 12.0f, floorHalfFlat = 20.0f;   // half size (metres) of the safety floor under the ground mesh / of the flat floor used without a mesh; the engine builds it from 2 triangles per square metre, so 100 cost ~30 ms
 	bool knockdown = true;               // living actors knocked down by the game (explosion blast, knocked out) get Delirium until the game starts getting them up
-	bool playerDeath = false;             // the player's own death ragdoll gets Delirium too (needs the PlayerCharacter[206] slot probe)
+	bool playerDeath = true;              // the player's own death ragdoll gets Delirium too (needs the PlayerCharacter[206] slot probe)
 	// reactions
 	bool burn = true, shock = true, explosion = true, gutCurl = true, fall = true, dumpNodes = true, burnByDamageTicks = true;
 	float burnBalanceSeconds = 1.2f, burnFlailSeconds = 4.0f; int dotTicks = 3; float dotWindow = 6.0f;

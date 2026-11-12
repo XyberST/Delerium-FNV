@@ -28,5 +28,6 @@ bool NodeWriteLocal(uint32_t node, const WorldXform& l);
 // True if the game has attached "dismembered limbs" extra data to this actor (ExtraDismemberedLimbs, type 0x5F: presence bit in the
 // extra data list at TESObjectREFR+0x44, bitfield at +8; verified against BaseExtraList::HasType at 0x40FE80).
 bool ActorHasDismemberedLimbs(uint32_t actor);
+int ActorDismemberFlags(uint32_t actor);                               // the 16-bit limb word of the actor's ExtraDismemberedLimbs (bit n = body part n cut off), -1 when it has none
 // Hex of the first 24 bytes of the actor's ExtraDismemberedLimbs (type 0x5F) record, for working out what it stores.
 void ActorDismemberDump(uint32_t actor, char* out, size_t n);

@@ -264,6 +264,15 @@ static unsigned HiddenMask(const Session& s) {                    // bit i set =
 }
 static unsigned HeadMask() { static unsigned m = 0; if (!m) for (int i = 0; i < 21; i++) if (g_rig.part[i].ref.find("Head") != std::string::npos) m |= 1u << i; return m; }
 static unsigned LegMask() { static unsigned m = 0; if (!m) for (int i = 1; i <= 6; i++) m |= 1u << i; return m; }   // thighs, shins, feet
+// The game's body parts (limb word bit n: 1 head, 2 head, 3 left upper arm, 4 left forearm, 5 right upper arm, 6 right forearm, 7 left thigh, 8 left calf, 9 left foot,
+// 10 right thigh, 11 right calf, 12 right foot) as the rig parts they take with them.
+static unsigned LimbPartMask(int flags) {
+	if (flags <= 0) return 0;
+	static const unsigned part[13] = { 0, 1u << 12, 1u << 12, (1u << 14) | (1u << 15) | (1u << 16), (1u << 15) | (1u << 16), (1u << 18) | (1u << 19) | (1u << 20), (1u << 19) | (1u << 20),
+		(1u << 1) | (1u << 2) | (1u << 3), (1u << 2) | (1u << 3), 1u << 3, (1u << 4) | (1u << 5) | (1u << 6), (1u << 5) | (1u << 6), 1u << 6 };
+	unsigned m = 0; for (int b = 1; b <= 12; b++) if (flags & (1 << b)) m |= part[b];
+	return m;
+}
 static int HiddenLimb(const Session& s) {                        // index of a rig part whose bone is scaled to (almost) nothing, or -1
 	const float base = s.rootW.S != 0 ? s.rootW.S : 1.0f;
 	for (int i = 0; i < 21; i++) { WorldXform w; if (NodeWorld(s.bone[i], w) && w.S < g_x.hiddenScale * base) return i; }
@@ -354,7 +363,9 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 		if (said3++ < 40) Log("observe[%u]: actor %08X is %.2f times the player's leg length (%s)", s->id, actor, ratio, cvt == 0x10870AC ? "creature" : "character");
 		if (!g_x.largeActors && ratio > g_x.largeScale) { Log("observe[%u]: actor %08X is large (%.2f), left to the game (LargeActors=0)", s->id, actor, ratio); g_refusedLarge[actor] = now; delete s; return; } } }
 	if (g_skipDismembered) {                                                                // a cut-off limb is hidden by scaling its bone to nothing; only those actors are left to the game
-		s->hiddenMask = HiddenMask(*s); s->headGone = (s->hiddenMask & HeadMask()) != 0; s->legGone = (s->hiddenMask & LegMask()) != 0;
+		const int limbFlags = ActorDismemberFlags(actor); s->hiddenMask = HiddenMask(*s) | LimbPartMask(limbFlags);
+		if (limbFlags > 0) { static int lf = 0; if (lf++ < 20) Log("observe[%u]: dismembered-limb flags %04X: cut-off rig parts %06X (bones scaled away: %06X)", s->id, limbFlags, LimbPartMask(limbFlags), HiddenMask(*s)); }
+		s->headGone = (s->hiddenMask & HeadMask()) != 0; s->legGone = (s->hiddenMask & LegMask()) != 0;
 		int hid = HiddenLimb(*s);
 		if (hid >= 0 && !(g_dismemberedOk && g_driveBodies)) { Log("observe: actor %08X has a cut-off limb ('%s' scaled away), left to the game", actor, g_rig.part[hid].ref.c_str()); delete s; return; }
 		if (hid >= 0 && s->verbose) Log("observe[%u]: cut-off limb ('%s'): the rest of the body still gets Delirium%s", s->id, g_rig.part[hid].ref.c_str(), s->headGone ? ", and falls at once (no head)" : "");
@@ -442,6 +453,7 @@ static bool TargetWorld(const Session& s, const V3* P, const Q* Qp, uint32_t n, 
 static bool SetupDriveBodies(Session& s) {
 	s.dbodies.clear();
 	for (auto& kv : s.rotPart) {
+		if (s.hiddenMask & (1u << kv.second)) continue;                                           // a cut-off part: its body is the game's (the severed head falls on its own)
 		uint32_t node = kv.first, co = 0, vt = 0, target = 0, body = 0;
 		if (!Rd(node + 0x1C, &co, 4) || !co || !Rd(co, &vt, 4) || vt != 0x10C53DC || !Rd(co + 8, &target, 4) || target != node || !Rd(co + 0x10, &body, 4) || !GameBodyOk(body)) continue;
 		uint32_t hkp = 0; Rd(body + 8, &hkp, 4); s.dbodies.push_back({ node, body, hkp + 0xE0 });
@@ -859,6 +871,9 @@ static void ProcessHits(Session& s) {
 	if (hit) { const bool fresh = s.rt - s.lastImpT > 0.06f; s.lastImpT = s.rt; if (fresh) ShotEvent(s, via); }
 }
 
+static void PruneCutOff(Session& s) {
+	s.dbodies.erase(std::remove_if(s.dbodies.begin(), s.dbodies.end(), [&](const auto& d) { auto it = s.rotPart.find(d.node); return it != s.rotPart.end() && (s.hiddenMask & (1u << it->second)); }), s.dbodies.end());
+}
 static bool Step(Session& s) {
 	uint32_t vt = 0, rid = 0;
 	if (!Rd(s.actor, &vt, 4) || vt != s.vt0 || !Rd(s.actor + 0xC, &rid, 4) || rid != s.refId) { if (s.verbose) Log("observe[%u]: the actor's memory now holds something else, session over", s.id); return false; }
@@ -929,12 +944,13 @@ static bool Step(Session& s) {
 		float sdt = dt;
 		if (stepNow) { sdt = std::min(s.simAcc, 0.1f); s.simAcc = 0; const double q0 = NowMs(); g_api->nm_agent_step(s.agent, s.world, sdt); if (s.verbose && s.frame <= 2) Log("observe[%u]: engine step on frame %u took %.1f ms", s.id, (unsigned)s.frame, NowMs() - q0); if (s.drown) Buoyancy(s, sdt); if (g_api->nm_agent_get_part_transforms(s.agent, s.tr, 21) < 0) return false; }
 		if (s.mode == 1) {
-			if (s.balancing && !s.headGone && (s.frame & 3) == 0 && (HiddenMask(s) & HeadMask())) {   // the head was just shot off: no more balancing
+			if ((s.frame & 3) == 0) { const unsigned m = HiddenMask(s) | LimbPartMask(ActorDismemberFlags(s.actor)); if (m & ~s.hiddenMask) { s.hiddenMask |= m; PruneCutOff(s); Log("observe[%u]: part(s) %06X cut off, no longer driven: the game's bodies for them are left alone", s.id, m); } }
+			if (s.balancing && !s.headGone && (s.frame & 3) == 0 && (s.hiddenMask & HeadMask())) {   // the head was just shot off: no more balancing
 				s.headGone = true; s.balancing = false; s.relaxed = true; s.tl.clear(); s.tlNext = 0;
 				const float at[3] = { s.tr[70], s.tr[71], s.tr[72] }, dir[3] = { 0, 0, 0 }; g_api->nm_agent_task_shot(s.agent, s.world, nullptr, 10, at, dir, g_shotHealth);
 				Log("observe[%u]: head cut off, collapsing", s.id);
 			}
-			if (s.balancing && !s.relaxed && !s.legGone && (s.frame & 3) == 0 && (HiddenMask(s) & LegMask())) {      // a leg was just cut off: nothing left to stand on
+			if (s.balancing && !s.relaxed && !s.legGone && (s.frame & 3) == 0 && (s.hiddenMask & LegMask())) {      // a leg was just cut off: nothing left to stand on
 				s.legGone = true; s.balancing = false; s.relaxed = true; s.tl.clear(); s.tlNext = 0;
 				g_api->nm_msg_begin(s.agent, "stayUpright"); g_api->nm_msg_set_bool(s.agent, "start", 0); g_api->nm_msg_send(s.agent, s.world);
 				g_api->nm_msg_begin(s.agent, "shotRelax"); g_api->nm_msg_set_float(s.agent, "relaxPeriod", 0.2f); g_api->nm_msg_send(s.agent, s.world);

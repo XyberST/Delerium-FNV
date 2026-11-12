@@ -63,6 +63,15 @@ bool NodeWriteWorld(uint32_t node, const WorldXform& w) { return Wr(node + 0x68,
 bool NodeWriteLocal(uint32_t node, const WorldXform& l) { return Wr(node + 0x34, l.R, 36) && Wr(node + 0x58, l.T, 12) && Wr(node + 0x64, &l.S, 4); }
 bool ActorHasDismemberedLimbs(uint32_t actor) { uint8_t b = 0; return Rd(actor + 0x44 + 8 + (0x5F >> 3), &b, 1) && (b & (1 << (0x5F & 7))) != 0; }
 
+int ActorDismemberFlags(uint32_t actor) {
+	uint32_t e = 0; Rd(actor + 0x44 + 4, &e, 4);
+	for (int i = 0; i < 64 && e > 0x10000; i++) {
+		uint8_t type = 0; if (!Rd(e + 4, &type, 1)) break;
+		if (type == 0x5F) { uint16_t w = 0; return Rd(e + 12, &w, 2) ? (int)w : -1; }
+		uint32_t nx = 0; if (!Rd(e + 8, &nx, 4)) break; e = nx;
+	}
+	return -1;
+}
 void ActorDismemberDump(uint32_t actor, char* out, size_t n) {
 	out[0] = 0; uint32_t e = 0; Rd(actor + 0x44 + 4, &e, 4);                                   // BaseExtraList: vtable, head of the data chain, presence bits
 	for (int i = 0; i < 64 && e > 0x10000; i++) {

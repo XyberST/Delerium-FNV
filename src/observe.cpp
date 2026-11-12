@@ -126,6 +126,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 struct Session {
 	double stageMs[3] = { 0, 0, 0 };                              // start-up timings
 	float lastHitT = -9, lastImpT = -9, extended = 0; int hits = 0, hitWType = -1; LONG impSeen = 0; DWORD startTick = 0, dmgSeen = 0;   // shooting it while it is dying; the weapon type of the killing hit
+	float driveMaxErr = 0, lastResync = -9, gRef = 0, gcx = 0, gcy = 0, gLow = 0, gLast = -9; int errFrames = 0, resyncs = 0; unsigned gHits0 = 0; bool meshed = false; GroundGrid* gnext = nullptr;   // blocked-body resync, ground following
 	bool drown = false; float waterZ = 0;                       // died in water
 	uint32_t unconState = 3; bool hitFire = false, hitShock = false; int hitLoc = -1;   // life state it went down with (3 unconscious, 6 essential down); the game's hit data
 	bool unconscious = false; int woundPart = -1; int lodFrame = 0; float lodRate = 0;   // life state 3; the rig part that was hit (-1 unknown); distance-based step rate
@@ -170,7 +171,7 @@ static bool CapturePose(const Session& s, V3* pos, Q* rq) {   // partRot = boneR
 	return true;
 }
 static void Free(Session* s) {
-	delete s->ground; s->ground = nullptr;
+	delete s->ground; s->ground = nullptr; delete s->gnext; s->gnext = nullptr;
 	if (s->agent) g_api->nm_agent_destroy(s->agent);
 	if (s->world) g_api->nm_world_destroy(s->world);
 	s->agent = nullptr; s->world = nullptr;
@@ -249,7 +250,7 @@ static bool GroundRayCb(void* ctx, float x, float y, float& z) {
 	Session& s = *(Session*)ctx; if (s.groundFailed) return false;
 	const float toUnits = (s.rootW.S != 0 ? s.rootW.S : 1.0f) / kUnit;                  // metres in the root frame -> game units
 	V3 w = mulMV(s.rootW.R, V3{ x * toUnits, y * toUnits, 0 });
-	const float top = s.rootW.T[2] + 1.4f * toUnits, bottom = s.rootW.T[2] - 1.3f * toUnits;   // from above the head to below the feet
+	const float top = s.rootW.T[2] + (s.gRef + 1.4f) * toUnits, bottom = s.rootW.T[2] + (s.gRef - 1.3f) * toUnits;   // from above the head to below the feet
 	float from[3] = { s.rootW.T[0] + w.x, s.rootW.T[1] + w.y, top }, to[3] = { from[0], from[1], bottom };
 	bool hit = false; float fr = 1, n[3];
 	if (!PickCast(from, to, g_groundFilter, hit, fr, n)) { s.groundFailed = true; return false; }
@@ -475,11 +476,11 @@ static void DriveBodies(Session& s, const float* tr) {
 	const float tau = g_x.driveTau, maxLin = g_driveMax * (s.kind >= 3 ? 2.0f : 1.0f) / kUnit / 7.0f, maxAng = g_x.driveMaxAngular;
 	// Blocked bodies (a fence, a wall) must not be pushed ever harder: that tunnels them through. The further behind the bodies are on average, the softer the push.
 	const float soft = s.driveErr > g_x.driveSoftAbove ? std::max(0.2f, g_x.driveSoftAbove / s.driveErr) : 1.0f;    // Havok units per second = game units per second / 7
-	float errSum = 0; unsigned n = 0;
+	float errSum = 0, errMax = 0; unsigned n = 0;
 	for (auto& d : s.dbodies) {
 		WorldXform tw, now; if (!TargetWorld(s, P, Qp, d.node, tw) || !NodeWorld(d.node, now)) continue;
 		if (now.S < g_x.hiddenScale * (s.rootW.S != 0 ? s.rootW.S : 1.0f)) continue;                 // a cut-off limb is the game's business
-		V3 e{ tw.T[0] - now.T[0], tw.T[1] - now.T[1], tw.T[2] - now.T[2] }; errSum += len(e); n++;
+		V3 e{ tw.T[0] - now.T[0], tw.T[1] - now.T[1], tw.T[2] - now.T[2] }; errSum += len(e); n++; errMax = std::max(errMax, len(e));
 		if (len(e) > g_x.driveMaxCatchUp) e = e * (g_x.driveMaxCatchUp / len(e));                                  // never ask for more than about 0.7 m of catching up at once
 		V3 lin = e * (g_driveGain * soft / tau / 7.0f); float ll = len(lin); if (ll > maxLin) lin = lin * (maxLin / ll);
 		float Re[9]; for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) Re[r * 3 + c] = tw.R[r * 3] * now.R[c * 3] + tw.R[r * 3 + 1] * now.R[c * 3 + 1] + tw.R[r * 3 + 2] * now.R[c * 3 + 2];   // target * current^T
@@ -489,7 +490,7 @@ static void DriveBodies(Session& s, const float* tr) {
 		float wl = len(w); if (wl > maxAng) w = w * (maxAng / wl);
 		const float lv[3] = { lin.x, lin.y, lin.z }, av[3] = { w.x, w.y, w.z }; GameSetBodyVelocity(d.body, lv, av);
 	}
-	s.nWritten = n; if (n) { float m = errSum / n; if (s.firstErr < 0) s.firstErr = m; s.driveErr = m; }
+	s.nWritten = n; if (n) { float m = errSum / n; if (s.firstErr < 0) s.firstErr = m; s.driveErr = m; s.driveMaxErr = errMax; }
 }
 
 // When the drive ends, the bodies still carry the last velocity we gave them. Left alone they shoot off once ("the corpse jumps"), so stop them first.
@@ -668,7 +669,7 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 		else {
 			std::vector<float> pos; std::vector<uint32_t> tri; float low = GroundMesh(*s.ground, 0.0f, pos, tri);
 			if (g_api->nm_world_add_mesh(s.world, pos.data(), (int)pos.size() / 3, tri.data(), (int)tri.size() / 3, nullptr) == 0) {
-				g_api->nm_world_add_floor(s.world, 0, 0, low - 0.02f, g_x.floorHalfMesh); meshed = true;
+				g_api->nm_world_add_floor(s.world, 0, 0, low - 0.02f, g_x.floorHalfMesh); meshed = true; s.meshed = true; s.gLow = low; s.gcx = 0; s.gcy = 0; s.gRef = 0;
 				if (s.verbose) Log("observe[%u]: ground mesh from %u/%d rays, lowest %.2f m, %d triangles", s.id, s.groundHits, total, low, (int)tri.size() / 3);
 			}
 		}
@@ -871,6 +872,33 @@ static void ProcessHits(Session& s) {
 	if (hit) { const bool fresh = s.rt - s.lastImpT > 0.06f; s.lastImpT = s.rt; if (fresh) ShotEvent(s, via); }
 }
 
+
+// The simulation is moved to where the game's bodies really are (they were held back by geometry the simulation does not know), keeping a part of its speed.
+static void ResyncAgent(Session& s) {
+	V3 p[21]; Q q[21]; if (!CapturePose(s, p, q)) return;
+	float st[21 * 13];
+	for (int i = 0; i < 21; i++) {
+		float v[3] = { 0, 0, 0 }, w[3] = { 0, 0, 0 }; g_api->nm_agent_get_part_velocity(s.agent, i, v, w);
+		float* o = st + i * 13; o[0] = p[i].x; o[1] = p[i].y; o[2] = p[i].z; o[3] = q[i].x; o[4] = q[i].y; o[5] = q[i].z; o[6] = q[i].w;
+		for (int k = 0; k < 3; k++) { o[7 + k] = v[k] * g_x.resyncKeep; o[10 + k] = w[k] * g_x.resyncKeep; }
+	}
+	g_api->nm_agent_set_part_states(s.agent, st, 21);
+}
+// Ground following: a fresh mesh around the body, sampled a few rays a frame, then swapped in for the world (the engine's world is just the collision data passed to each step).
+static void FinishGround(Session& s) {
+	GroundGrid* g = s.gnext; s.gnext = nullptr; if (!g) return;
+	if (s.groundHits - s.gHits0 >= (unsigned)(g->total() / 10)) {
+		std::vector<float> pos; std::vector<uint32_t> tri; const float low = GroundMesh(*g, s.gRef - 0.9f, pos, tri);
+		NmWorld* w2 = g_api->nm_world_create();
+		if (w2 && g_api->nm_world_add_mesh(w2, pos.data(), (int)pos.size() / 3, tri.data(), (int)tri.size() / 3, nullptr) == 0) {
+			g_api->nm_world_add_floor(w2, g->cx, g->cy, low - 0.02f, g_x.floorHalfMesh);
+			NmWorld* old = s.world; s.world = w2; if (old) g_api->nm_world_destroy(old);
+			s.gcx = g->cx; s.gcy = g->cy; s.gLow = low;
+			static int said = 0; if (said++ < 12) Log("observe[%u]: ground followed the body: new mesh around (%.1f, %.1f) m, lowest %.2f m, %d triangles", s.id, g->cx, g->cy, low, (int)tri.size() / 3);
+		} else if (w2) g_api->nm_world_destroy(w2);
+	}
+	delete g;
+}
 static void PruneCutOff(Session& s) {
 	s.dbodies.erase(std::remove_if(s.dbodies.begin(), s.dbodies.end(), [&](const auto& d) { auto it = s.rotPart.find(d.node); return it != s.rotPart.end() && (s.hiddenMask & (1u << it->second)); }), s.dbodies.end());
 }
@@ -956,7 +984,25 @@ static bool Step(Session& s) {
 				g_api->nm_msg_begin(s.agent, "shotRelax"); g_api->nm_msg_set_float(s.agent, "relaxPeriod", 0.2f); g_api->nm_msg_send(s.agent, s.world);
 				Log("observe[%u]: a leg was cut off, going down at once", s.id);
 			}
+			if (g_x.groundFollow && s.meshed && !s.groundFailed && g_groundReady) {                       // keep the ground under the body as it travels (stairs, slopes)
+				if (s.gnext) { GroundWork(*s.gnext, 100, GroundRayCb, &s); if (s.gnext->done()) FinishGround(s); }
+				else if ((s.frame & 3) == 0 && s.rt - s.gLast > 0.25f) {
+					const float px = s.tr[0], py = s.tr[1], pz = s.tr[2], dx = px - s.gcx, dy = py - s.gcy, reach = g_groundHalf * g_groundCell;
+					if (std::sqrt(dx * dx + dy * dy) > reach * g_x.groundFollowDist || pz - 0.2f < s.gRef - 0.75f) {
+						s.gnext = new GroundGrid(); s.gRef = pz; GroundInit(*s.gnext, px, py, g_groundCell, g_groundHalf, pz - 1.0f, pz + 0.9f); s.gHits0 = s.groundHits; s.gLast = s.rt;
+					}
+				}
+			}
 			DriveBodies(s, s.tr);
+			if (g_x.resync && s.frame > 8) {                                                               // held back by geometry the simulation does not know: move it to where the bodies are
+				if (s.driveErr > g_x.resyncMean || s.driveMaxErr > g_x.resyncMax) {
+					if (++s.errFrames >= 3 && s.rt - s.lastResync >= g_x.resyncGap) {
+						ResyncAgent(s); s.errFrames = 0; s.lastResync = s.rt; s.resyncs++;
+						static int said = 0; if (said++ < 12) Log("observe[%u]: the game's bodies are held back (mean %.0f, worst %.0f units): simulation moved to where they are (resync %d)", s.id, s.driveErr, s.driveMaxErr, s.resyncs);
+						if (s.resyncs > g_x.resyncGiveUp) { Log("observe[%u]: stuck against the world after %d resyncs, leaving the corpse to the game", s.id, s.resyncs); StopDrive(s); Free(&s); return false; }
+					}
+				} else s.errFrames = 0;
+			}
 			if (s.simTime >= g_x.driveGiveUpSeconds && s.driveErr > g_x.driveGiveUpDistance) {                                              // Delirium and the game's bodies have parted ways (blocked, or the bodies are not following): the game carries on alone
 				Log("observe[%u]: the game's bodies are %.0f units from the target after %u frames, leaving the corpse to the game", s.id, s.driveErr, s.frame);
 				StopDrive(s); Free(&s); return false;

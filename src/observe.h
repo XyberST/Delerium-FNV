@@ -63,6 +63,8 @@ struct ExtraCfg {
 	bool drown = true; float drownDepth = 0.9f, drownSeconds = 6.0f, drownBuoyancy = 0.92f, drownDrag = 2.0f;   // actors that die in water: depth of the feet below the surface (m), struggle time, how much of gravity the water cancels, drag
 	bool shotReact = true; float shotRapidWindow = 0.35f, shotExtend = 1.5f, shotMaxExtend = 4.0f, shotShorten = 0.35f, shotPush = 12.0f;   // shooting an actor that is dying on its feet
 	bool tapImpulses = true; float tapFeed = 1.0f, tapMin = 0.05f;   // impulses the game applies to a Delirium body (bullets, other mods) are fed into the simulation
+	bool resync = true; float resyncMean = 20.0f, resyncMax = 35.0f, resyncGap = 0.25f, resyncKeep = 0.75f; int resyncGiveUp = 14;   // when the game's bodies are held back (a wall), the simulation is moved to where they really are
+	bool groundFollow = true; float groundFollowDist = 0.45f;   // the ground mesh is rebuilt around the body as it moves (stairs, slopes)
 	bool hitData = true;                 // read the game's hit data (hit location, weapon) when an actor is damaged
 	char fireWeapons[160] = "";          // FormIDs (hex, comma separated) of weapons whose hits set an actor on fire; the log lists the weapon of every hit
 	char shockWeapons[160] = "";         // FormIDs of weapons whose hits electrocute

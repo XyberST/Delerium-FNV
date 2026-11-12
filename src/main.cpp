@@ -85,6 +85,8 @@ static void ApplyIni(const std::string& ini) {
 		x.explosion = B("Reactions", "Explosion", x.explosion); x.explosionSeconds = F("Reactions", "ExplosionSeconds", x.explosionSeconds);
 		x.explosionRollChance = F("Reactions", "ExplosionRollChance", x.explosionRollChance); x.explosionWritheChance = F("Reactions", "ExplosionWritheChance", x.explosionWritheChance);
 		x.playerDeath = B("Reactions", "PlayerDeath", x.playerDeath); x.knockdown = B("Reactions", "Knockdown", x.knockdown); x.creatures = B("Actors", "Creatures", x.creatures); x.largeActors = B("Actors", "LargeActors", x.largeActors); x.largeScale = F("Actors", "LargeScale", x.largeScale); x.unconscious = B("Reactions", "Unconscious", x.unconscious); x.hitData = B("Reactions", "HitData", x.hitData);
+		x.resync = B("Drive", "Resync", x.resync); x.resyncMean = F("Drive", "ResyncMean", x.resyncMean); x.resyncMax = F("Drive", "ResyncMax", x.resyncMax); x.resyncGap = F("Drive", "ResyncGap", x.resyncGap); x.resyncKeep = F("Drive", "ResyncKeep", x.resyncKeep); x.resyncGiveUp = (int)F("Drive", "ResyncGiveUp", (float)x.resyncGiveUp);
+		x.groundFollow = B("World", "Follow", x.groundFollow); x.groundFollowDist = F("World", "FollowDistance", x.groundFollowDist);
 		x.impulseAll = F("Impulse", "All", x.impulseAll); x.impulseBullet = F("Impulse", "Bullet", x.impulseBullet); x.impulseMelee = F("Impulse", "Melee", x.impulseMelee); x.impulseExplosion = F("Impulse", "Explosion", x.impulseExplosion); x.impulseKnock = F("Impulse", "Knockdown", x.impulseKnock); x.impulseOther = F("Impulse", "Other", x.impulseOther);
 		x.fetalAgony = B("Reactions", "FetalAgony", x.fetalAgony); x.holdGut = B("Reactions", "HoldGut", x.holdGut);
 		x.drown = B("Reactions", "Drown", x.drown); x.drownDepth = F("Reactions", "DrownDepth", x.drownDepth); x.drownSeconds = F("Reactions", "DrownSeconds", x.drownSeconds); x.drownBuoyancy = F("Reactions", "DrownBuoyancy", x.drownBuoyancy); x.drownDrag = F("Reactions", "DrownDrag", x.drownDrag);
@@ -121,7 +123,7 @@ __declspec(dllexport) bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInf
 __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	PickLogDir();
 	LogOpen((g_logDir + "\\DeliriumFNV.log").c_str());
-	Log("DeliriumFNV 0.22.1 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
+	Log("DeliriumFNV 0.23 loading; runtime %08X, nvse %08X; plugin dir %s; log dir %s", nvse->runtimeVersion, nvse->nvseVersion, g_pluginDir.c_str(), g_logDir.c_str());
 	IngameInit(const_cast<NVSEInterface*>(nvse));
 	std::string ini = g_pluginDir + "\\DeliriumFNV.ini";
 	if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) ini = g_root + "\\DeliriumFNV.ini";   // also accept the ini beside the dll

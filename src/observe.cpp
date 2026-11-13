@@ -58,6 +58,7 @@ void ObserveInit(EngineApi* api, void* fit, const char* dir) {
 
 // ---- death detection (runs inside the probe thunks: tiny and lock-free) ----
 static volatile LONG g_dmgActor[64], g_dmgTick[64], g_dmgN, g_dmgAtk[64];
+static std::map<uint32_t, DWORD> g_dyingSince;   // actors seen going from alive to dying or dead, waiting for their kill burst
 static std::map<uint32_t, DWORD> g_refusedLarge; static float g_lodScale = 1.0f; static double g_frameMs = 0;
 // Where the attacker of the latest hit on this actor stands (third argument of the damage slot), checked to be a real actor before it is believed.
 static bool AttackerPos(uint32_t victim, float out[3]) {
@@ -78,12 +79,13 @@ static volatile LONG g_mtAll, g_mtDyn, g_plDmg, g_mtRingN; static volatile LONG 
 static volatile LONG g_q[16], g_qw, g_qr; static volatile LONG g_lastQ, g_lastQTick;
 static volatile LONG g_hdActor[32], g_hdTick[32], g_hdLoc[32], g_hdFlags[32], g_hdWeap[32], g_hdWType[32], g_hdN;       // the game's hit data of the latest hits
 static volatile LONG g_pushActor[16], g_pushTick[16], g_pushN;
+static bool RecentPush(uint32_t actor, DWORD now, DWORD ms) { for (LONG i = g_pushN - 1; i >= 0 && i >= g_pushN - 16; i--) if ((uint32_t)g_pushActor[i & 15] == actor && now - (DWORD)g_pushTick[i & 15] <= ms) return true; return false; }
 static volatile LONG g_impN, g_driven, g_impMotion[256], g_impTick[256]; static float g_impJ[256][3];   // impulses the game applied to dynamic motions (recorded on any thread, read by the sessions)                                                                         // actors PushActorAway was called for
 // The damage slot runs inside the game's hit handling, whose HitData (0x64 bytes: attacker, target, source, hit location, flags, damages, weapon) sits in a caller frame:
 // look through the stack for a pointer to something shaped like that and aimed at this actor.
 static void ScanHitData(uint32_t actor, const uint32_t* stack, DWORD now) {
 	const uint32_t attacker = stack[3];
-	for (int k = 4; k < 4 + 160; k++) {
+	for (int k = 4; k < 4 + 320; k++) {
 		uint32_t p = 0; if (!Rd((uint32_t)(uintptr_t)&stack[k], &p, 4)) break; if (p < 0x10000 || (p & 3)) continue;
 		uint32_t h[0x19]; if (!Rd(p, h, sizeof h)) continue;
 		if (h[1] != actor || h[0] != attacker || h[3] > 40) continue;                                  // target, aggressor, a plausible hit location
@@ -126,6 +128,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 struct Session {
 	double stageMs[3] = { 0, 0, 0 };                              // start-up timings
 	float lastHitT = -9, lastImpT = -9, extended = 0; int hits = 0, hitWType = -1; LONG impSeen = 0; DWORD startTick = 0, dmgSeen = 0;   // shooting it while it is dying; the weapon type of the killing hit
+	bool needDynamic = false, resyncArmed = true, pendShorten = false; float shortenAt = 0, peakSpeed = 0, impScale = 1; int driveWorstPart = -1, nGround = 0; const char* endWhy = nullptr;   // death fallback; resync hysteresis; deferred shortening; the end-of-session summary
 	float driveMaxErr = 0, lastResync = -9, gRef = 0, gcx = 0, gcy = 0, gLow = 0, gLast = -9; int errFrames = 0, resyncs = 0; unsigned gHits0 = 0; bool meshed = false; GroundGrid* gnext = nullptr;   // blocked-body resync, ground following
 	bool drown = false; float waterZ = 0;                       // died in water
 	uint32_t unconState = 3; bool hitFire = false, hitShock = false; int hitLoc = -1;   // life state it went down with (3 unconscious, 6 essential down); the game's hit data
@@ -292,7 +295,7 @@ static float BodyRatio(uint32_t actor) {
 	static float base = -1.0f; if (base <= 0) { uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl) base = LegLength(pl); }
 	if (base <= 0) return -1.0f; const float l = LegLength(actor); return l > 0 ? l / base : -1.0f;
 }
-static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
+static void Begin(uint32_t actor, bool knock = false, int knockState = 0, bool needDyn = false) {
 	const double b0 = NowMs();
 	DWORD now = GetTickCount();
 	for (Session* a : g_active) if (a->actor == actor) return;
@@ -314,7 +317,7 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0) {
 	if (g_x.minFps > 0 && g_fps > 0 && g_fps < g_x.minFps) { rmap[actor] = now; static int said = 0; if (said++ < 5) Log("observe: frame rate %.0f is below MinFps %.0f, corpse left to the game", g_fps, g_x.minFps); return; }
 	if (g_active.size() >= 24) for (size_t i = 0; i < g_active.size(); i++) if (g_active[i]->phase == 3) { Free(g_active[i]); delete g_active[i]; g_active.erase(g_active.begin() + i); break; }   // drop the oldest held pose
 	rmap[actor] = now;
-	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->knock = knock; s->knockState = knockState; s->startTick = now; s->unconscious = uncon; s->unconState = ls0; s->verbose = s->id <= 4;
+	Session* s = new Session(); s->actor = actor; s->id = ++g_started; s->knock = knock; s->knockState = knockState; s->startTick = now; s->needDynamic = needDyn; s->unconscious = uncon; s->unconState = ls0; s->verbose = s->id <= 4;
 	if (knock) { static int kn = 0; s->verbose = kn++ < 6; }
 	{ const HitRec hr = g_x.hitData ? RecentHit(actor, now) : HitRec();
 	  if (hr.ok) {
@@ -463,9 +466,9 @@ static bool SetupDriveBodies(Session& s) {
 		for (auto& kv : s.rotPart) { uint32_t co = 0, vt = 0, tg = 0, body = 0; if (!Rd(kv.first + 0x1C, &co, 4) || !co) { Log("observe[%u]: first body: node %08X has no collision object", s.id, kv.first); break; }
 			Rd(co, &vt, 4); Rd(co + 8, &tg, 4); Rd(co + 0x10, &body, 4); char d[200]; GameBodyDescribe(body, d, sizeof d); Log("observe[%u]: first body refused: co %08X vt %08X target %08X (node %08X); %s", s.id, co, vt, tg, kv.first, d); break; }
 	}
-	{ uint32_t pl = 0; if (Rd(0x011DEA3C, &pl, 4) && pl == s.actor) {                              // the player is only taken over when the game really made its skeleton a ragdoll
+	{ uint32_t pl = 0; if ((Rd(0x011DEA3C, &pl, 4) && pl == s.actor) || s.needDynamic) {          // the player (and any actor started from its life state) is only taken over when the game really made its skeleton a ragdoll
 		unsigned dyn = 0; for (auto& d : s.dbodies) { uint8_t mt = 0; if (Rd(d.motion + 8, &mt, 1) && (mt == 1 || mt == 2 || mt == 3 || mt == 6)) dyn++; }
-		Log("observe[%u]: player: %u bodies found, %u of them dynamic (not keyframed)", s.id, (unsigned)s.dbodies.size(), dyn);
+		Log("observe[%u]: %u bodies found, %u of them dynamic (not keyframed)", s.id, (unsigned)s.dbodies.size(), dyn);
 		if (dyn < 10) { s.dbodies.clear(); return false; } } }
 	if (s.verbose) Log("observe[%u]: driving %u of the game's bodies by velocity", s.id, (unsigned)s.dbodies.size());
 	return s.dbodies.size() >= 10;
@@ -480,7 +483,7 @@ static void DriveBodies(Session& s, const float* tr) {
 	for (auto& d : s.dbodies) {
 		WorldXform tw, now; if (!TargetWorld(s, P, Qp, d.node, tw) || !NodeWorld(d.node, now)) continue;
 		if (now.S < g_x.hiddenScale * (s.rootW.S != 0 ? s.rootW.S : 1.0f)) continue;                 // a cut-off limb is the game's business
-		V3 e{ tw.T[0] - now.T[0], tw.T[1] - now.T[1], tw.T[2] - now.T[2] }; errSum += len(e); n++; errMax = std::max(errMax, len(e));
+		V3 e{ tw.T[0] - now.T[0], tw.T[1] - now.T[1], tw.T[2] - now.T[2] }; errSum += len(e); n++; if (len(e) > errMax) { errMax = len(e); auto wp = s.rotPart.find(d.node); s.driveWorstPart = wp == s.rotPart.end() ? -1 : wp->second; }
 		if (len(e) > g_x.driveMaxCatchUp) e = e * (g_x.driveMaxCatchUp / len(e));                                  // never ask for more than about 0.7 m of catching up at once
 		V3 lin = e * (g_driveGain * soft / tau / 7.0f); float ll = len(lin); if (ll > maxLin) lin = lin * (maxLin / ll);
 		float Re[9]; for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) Re[r * 3 + c] = tw.R[r * 3] * now.R[c * 3] + tw.R[r * 3 + 1] * now.R[c * 3 + 1] + tw.R[r * 3 + 2] * now.R[c * 3 + 2];   // target * current^T
@@ -637,12 +640,16 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	uint32_t plA = 0; const bool isPlayer = Rd(0x011DEA3C, &plA, 4) && plA == s.actor;
 	// how the game's kill impulse is scaled: by what killed the actor (the weapon of the killing hit) or knocked it down
 	const int wt = s.hitWType; float imp = g_x.impulseAll; const char* impName = "bullet";
-	if (g_x.fall && s.floorDrop > 0.0f && !s.headGone) { imp *= g_x.impulseOther; impName = "fall"; }
+	const bool pushed = RecentPush(s.actor, GetTickCount(), 2500);
+	if (isPlayer) { imp *= g_x.impulsePlayer; impName = "player"; }
+	else if (g_x.fall && s.floorDrop > 0.0f && !s.headGone) { imp *= g_x.impulseOther; impName = "fall"; }
 	else if (s.knock) { if (s.knockState == 1 && !s.unconscious) { imp *= g_x.impulseExplosion; impName = "explosion (knocked down)"; } else { imp *= g_x.impulseKnock; impName = "knockdown"; } }
 	else if (wt >= 9 && wt <= 12) { imp *= g_x.impulseExplosion; impName = "explosive weapon"; }
-	else if (wt < 0 && chestSpeed > g_balanceMaxSpeed) { imp *= g_x.impulseExplosion; impName = "blast"; }
+	else if (pushed) { imp *= g_x.impulseExplosion; impName = "pushed away (explosion)"; }
+	else if (wt < 0 && chestSpeed > g_x.blastSpeed) { imp *= g_x.impulseExplosion; impName = "fast kill, no weapon data"; }
 	else if (wt >= 0 && wt <= 2) { imp *= g_x.impulseMelee; impName = "melee"; }
 	else imp *= g_x.impulseBullet;
+	s.impScale = imp;
 	if (s.verbose && std::fabs(imp - 1.0f) > 0.001f) Log("observe[%u]: kill impulse x%.2f (%s)", s.id, imp, impName);
 	// died in water (feet well under the surface)?
 	bool drowning = false; float waterZ = 0;
@@ -651,7 +658,7 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	const bool willBalance = !drowning && !s.knock && g_balance && !s.headGone && !s.legGone && chestSpeed <= g_balanceMaxSpeed && regionMul > 0.0f;
 	const float bf = willBalance ? g_balanceVelScale : 1.0f, vs = g_velScale * bf;                       // a body that is meant to stay up inherits less of the kill's motion
 	for (int i = 0; i < 21; i++) {
-		vel[i] = rv[i] * (bf * imp);
+		vel[i] = rv[i] * (bf * imp); { const float vl = len(vel[i]); if (g_x.maxLaunchSpeed > 0 && vl > g_x.maxLaunchSpeed) vel[i] = vel[i] * (g_x.maxLaunchSpeed / vl); }
 		Q dq = mul(q[i], conj(s.q0[i])); if (dq.w < 0) dq = { -dq.x, -dq.y, -dq.z, -dq.w };
 		float w = std::min(1.0f, dq.w), ang = 2 * std::acos(w), sn = std::sqrt(std::max(0.0f, 1 - w * w));
 		V3 av = sn > 1e-5f ? V3{ dq.x / sn, dq.y / sn, dq.z / sn } * (ang * vs * imp / dt) : V3{ 0, 0, 0 };
@@ -759,8 +766,10 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	s.last = c; s.frame = 0; s.phase = 2;
 	s.mode = (g_driveBodies && SetupDriveBodies(s)) ? 1 : 0;
 	if (!s.mode && s.hiddenMask && g_skipDismembered) { Log("observe[%u]: cut-off limb and the bodies cannot be driven, leaving the corpse to the game", s.id); return false; }
+	if (!s.mode && s.needDynamic) { Log("observe[%u]: not a ragdoll the simulation can drive, left to the game", s.id); return false; }
 	if (!s.mode && isPlayer) { Log("observe[%u]: player: the game's bodies cannot be driven, left to the game (the player is never switched to keyframed)", s.id); return false; }
 	if (!s.mode) KeyframeGameBodies(s);
+	if (isPlayer && s.mode == 1 && g_x.playerDeathCam) { uint8_t tp = 1; Rd(plA + 0x64A, &tp, 1); if (!tp) { const uint8_t one = 1; Wr(plA + 0x64A, &one, 1); Wr(plA + 0x64C, &one, 1); Log("observe[%u]: player: died in first person, the third-person camera is switched on to show the ragdoll", s.id); } }
 	s.impSeen = g_impN;
 	if (s.verbose) Log("observe[%u]: Delirium body started (pelvis %.2f m/s, chest %.2f m/s)", s.id, len(vel[0]), len(vel[10]));
 	if (s.verbose) { uint32_t rc = 0, rn = 0; Rd(s.actor + 0xAC, &rc, 4); if (rc) Rd(rc + 0x58, &rn, 4); Log("observe[%u]: the actor's ragdoll controller %08X (its node %08X, skeleton root %08X); game hit location %d, rig part hit %d", s.id, rc, rn, s.root, s.hitLoc, s.woundPart >= 0 ? s.woundPart : -1); }
@@ -830,16 +839,17 @@ static void Buoyancy(Session& s, float dt) {
 // Shooting an actor that is dying in the Delirium state: a slow shot brings it down sooner, rapid fire keeps it up a little longer.
 static void ShotEvent(Session& s, const char* via) {
 	if (!g_x.shotReact) return;
-	const float gap = s.rt - s.lastHitT; s.lastHitT = s.rt; s.hits++;
+	const bool first = s.hits == 0; const float gap = first ? 99.0f : s.rt - s.lastHitT; s.lastHitT = s.rt; s.hits++;
 	if (s.balancing && !s.relaxed) {
-		if (s.hits > 1 && gap <= g_x.shotRapidWindow) { const float add = std::min(g_x.shotExtend, g_x.shotMaxExtend - s.extended); if (add > 0) { s.balanceFor += add; s.extended += add; } }
-		else { const float rem = std::max(0.0f, s.balanceFor - s.balanceT); s.balanceFor = s.balanceT + rem * g_x.shotShorten; }
+		if (!first && gap <= g_x.shotRapidWindow) { const float add = std::min(g_x.shotExtend, g_x.shotMaxExtend - s.extended); if (add > 0) { s.balanceFor += add; s.extended += add; } }
+		s.pendShorten = true; s.shortenAt = s.rt + g_x.shotRapidWindow;                              // brought down sooner unless another shot follows within the window
 	}
-	static int said = 0; if (said++ < 12) Log("observe[%u]: shot again in the Delirium state (%s), hit %d, %.2f s after the last, standing until %.1f s (%s)", s.id, via, s.hits, gap, s.balanceFor, (s.balancing && !s.relaxed) ? "still up" : "already down");
+	static int said = 0; if (said++ < 12) Log("observe[%u]: shot again in the Delirium state (%s), hit %d, %s, standing until %.1f s (%s)", s.id, via, s.hits, first ? "the first" : (std::to_string(gap) + " s after the last").c_str(), s.balanceFor, (s.balancing && !s.relaxed) ? "still up" : "already down");
 }
 // Impulses the game applied to this body's motions (a bullet on the corpse, Involuntary Discharge's recoil, a second blast) go into the simulation; a hit with no impulse of its own pushes.
 static void ProcessHits(Session& s) {
 	if (s.mode != 1 || !s.agent || (!g_x.shotReact && !g_x.tapImpulses)) return;
+	if (s.pendShorten && s.rt >= s.shortenAt) { s.pendShorten = false; if (s.balancing && !s.relaxed) { const float rem = std::max(0.0f, s.balanceFor - s.balanceT); s.balanceFor = s.balanceT + rem * g_x.shotShorten; } }
 	const DWORD now = GetTickCount(); bool hit = false; const char* via = "impulse";
 	const LONG top = g_impN; const LONG from = std::max(s.impSeen, top > 256 ? top - 256 : (LONG)0); s.impSeen = top;
 	if (g_x.tapImpulses) for (LONG i = from; i < top; i++) {
@@ -893,7 +903,7 @@ static void FinishGround(Session& s) {
 		if (w2 && g_api->nm_world_add_mesh(w2, pos.data(), (int)pos.size() / 3, tri.data(), (int)tri.size() / 3, nullptr) == 0) {
 			g_api->nm_world_add_floor(w2, g->cx, g->cy, low - 0.02f, g_x.floorHalfMesh);
 			NmWorld* old = s.world; s.world = w2; if (old) g_api->nm_world_destroy(old);
-			s.gcx = g->cx; s.gcy = g->cy; s.gLow = low;
+			s.gcx = g->cx; s.gcy = g->cy; s.gLow = low; s.nGround++;
 			static int said = 0; if (said++ < 12) Log("observe[%u]: ground followed the body: new mesh around (%.1f, %.1f) m, lowest %.2f m, %d triangles", s.id, g->cx, g->cy, low, (int)tri.size() / 3);
 		} else if (w2) g_api->nm_world_destroy(w2);
 	}
@@ -910,7 +920,7 @@ static bool Step(Session& s) {
 		if (ls == 1 || ls == 2) { s.knock = false; if (s.verbose) Log("observe[%u]: the knocked-down actor died, carrying on as a death", s.id); }
 		else {
 			uint32_t pr = 0; uint8_t ks = 0xFF; Rd(s.actor + 0x68, &pr, 4); if (pr) Rd(pr + 0x13C, &ks, 1);
-			if (s.unconscious ? ls != s.unconState : (ls != 0 || ks < 1 || ks > 4)) { Log("observe[%u]: knockdown over (knock state %d, life state %u), the game takes the body back", s.id, (int)(signed char)ks, ls); if (s.mode == 1) StopDrive(s); return false; }
+			if (s.unconscious ? ls != s.unconState : (ls != 0 || ks < 1 || ks > 4)) { s.endWhy = "the game getting the knocked-down actor up"; Log("observe[%u]: knockdown over (knock state %d, life state %u), the game takes the body back", s.id, (int)(signed char)ks, ls); if (s.mode == 1) StopDrive(s); return false; }
 		}
 	}
 	if (!s.knock && ++s.lifeCheck % 15 == 0 && g_requireDead) {                              // revived, reloaded or replaced by a living actor: stop touching it
@@ -964,7 +974,7 @@ static bool Step(Session& s) {
 		if (s.lodFrame-- <= 0) {                                                                       // step rate by distance to the player, every 20 frames
 			s.lodFrame = 20; const float d = DistToPlayer(s.actor); s.lodRate = 0;
 			if (g_x.lod && d >= 0) s.lodRate = d < g_x.lodNear ? 0.0f : d < g_x.lodMid ? g_x.lodRateMid : g_x.lodRateFar;
-			if (g_x.maxDistance > 0 && d > g_x.maxDistance * 1.3f) { Log("observe[%u]: %.0f units from the player, handing it back to the game", s.id, d); if (s.mode == 1) StopDrive(s); return false; }
+			if (g_x.maxDistance > 0 && d > g_x.maxDistance * 1.3f) { s.endWhy = "being too far from you"; Log("observe[%u]: %.0f units from the player, handing it back to the game", s.id, d); if (s.mode == 1) StopDrive(s); return false; }
 		}
 		float rate = g_x.simRate > 0 ? g_x.simRate : 120.0f; if (s.lodRate > 0) rate = std::min(rate, s.lodRate);
 		if (g_x.frameBudgetMs > 0) rate = std::max(12.0f, rate * g_lodScale);
@@ -984,27 +994,35 @@ static bool Step(Session& s) {
 				g_api->nm_msg_begin(s.agent, "shotRelax"); g_api->nm_msg_set_float(s.agent, "relaxPeriod", 0.2f); g_api->nm_msg_send(s.agent, s.world);
 				Log("observe[%u]: a leg was cut off, going down at once", s.id);
 			}
+			if ((s.frame & 7) == 0) { float c3[3], v3[3]; if (g_api->nm_agent_get_com(s.agent, c3, v3) >= 0) s.peakSpeed = std::max(s.peakSpeed, std::sqrt(v3[0] * v3[0] + v3[1] * v3[1] + v3[2] * v3[2])); }
 			if (g_x.groundFollow && s.meshed && !s.groundFailed && g_groundReady) {                       // keep the ground under the body as it travels (stairs, slopes)
 				if (s.gnext) { GroundWork(*s.gnext, 100, GroundRayCb, &s); if (s.gnext->done()) FinishGround(s); }
 				else if ((s.frame & 3) == 0 && s.rt - s.gLast > 0.25f) {
-					const float px = s.tr[0], py = s.tr[1], pz = s.tr[2], dx = px - s.gcx, dy = py - s.gcy, reach = g_groundHalf * g_groundCell;
+					const float px = s.tr[0], py = s.tr[1], pz = s.tr[2], reach = g_groundHalf * g_groundCell, look = 0.4f;
+					float com[3] = { 0, 0, 0 }, cv[3] = { 0, 0, 0 }; g_api->nm_agent_get_com(s.agent, com, cv);                    // where the body is heading, not just where it is
+					const float qx = px + cv[0] * look, qy = py + cv[1] * look, dx = qx - s.gcx, dy = qy - s.gcy;
 					if (std::sqrt(dx * dx + dy * dy) > reach * g_x.groundFollowDist || pz - 0.2f < s.gRef - 0.75f) {
-						s.gnext = new GroundGrid(); s.gRef = pz; GroundInit(*s.gnext, px, py, g_groundCell, g_groundHalf, pz - 1.0f, pz + 0.9f); s.gHits0 = s.groundHits; s.gLast = s.rt;
+						float cx = qx, cy = qy; { const float ex = cx - px, ey = cy - py, el = std::sqrt(ex * ex + ey * ey), lim = reach * 0.6f; if (el > lim) { cx = px + ex / el * lim; cy = py + ey / el * lim; } }
+						const float zr = pz + std::min(0.0f, cv[2] * look * 0.7f);
+						s.gnext = new GroundGrid(); s.gRef = zr; GroundInit(*s.gnext, cx, cy, g_groundCell, g_groundHalf, zr - 1.0f, zr + 0.9f); s.gHits0 = s.groundHits; s.gLast = s.rt;
 					}
 				}
 			}
 			DriveBodies(s, s.tr);
 			if (g_x.resync && s.frame > 8) {                                                               // held back by geometry the simulation does not know: move it to where the bodies are
-				if (s.driveErr > g_x.resyncMean || s.driveMaxErr > g_x.resyncMax) {
+				const bool high = s.driveErr > g_x.resyncMean || (s.driveMaxErr > g_x.resyncMax && s.driveErr > g_x.resyncMin);
+				if (s.driveErr < g_x.resyncMean * 0.6f && s.driveMaxErr < g_x.resyncMax * 0.6f) s.resyncArmed = true;   // the error has to come back down before another resync
+				if (high && s.resyncArmed) {
 					if (++s.errFrames >= 3 && s.rt - s.lastResync >= g_x.resyncGap) {
-						ResyncAgent(s); s.errFrames = 0; s.lastResync = s.rt; s.resyncs++;
-						static int said = 0; if (said++ < 12) Log("observe[%u]: the game's bodies are held back (mean %.0f, worst %.0f units): simulation moved to where they are (resync %d)", s.id, s.driveErr, s.driveMaxErr, s.resyncs);
-						if (s.resyncs > g_x.resyncGiveUp) { Log("observe[%u]: stuck against the world after %d resyncs, leaving the corpse to the game", s.id, s.resyncs); StopDrive(s); Free(&s); return false; }
+						if (s.rt - s.lastResync > 1.5f) s.resyncs = 0;
+						ResyncAgent(s); s.errFrames = 0; s.lastResync = s.rt; s.resyncs++; s.resyncArmed = false;
+						static int said = 0; if (said++ < 12) Log("observe[%u]: the game's bodies are held back (mean %.0f, worst %.0f units at part %d): simulation moved to where they are (resync %d)", s.id, s.driveErr, s.driveMaxErr, s.driveWorstPart, s.resyncs);
+						if (s.resyncs > g_x.resyncGiveUp) { s.endWhy = "being stuck against the world"; Log("observe[%u]: stuck against the world after %d resyncs, leaving the corpse to the game", s.id, s.resyncs); StopDrive(s); Free(&s); return false; }
 					}
-				} else s.errFrames = 0;
+				} else if (!high) s.errFrames = 0;
 			}
 			if (s.simTime >= g_x.driveGiveUpSeconds && s.driveErr > g_x.driveGiveUpDistance) {                                              // Delirium and the game's bodies have parted ways (blocked, or the bodies are not following): the game carries on alone
-				Log("observe[%u]: the game's bodies are %.0f units from the target after %u frames, leaving the corpse to the game", s.id, s.driveErr, s.frame);
+				s.endWhy = "the drive giving up"; Log("observe[%u]: the game's bodies are %.0f units from the target after %u frames, leaving the corpse to the game", s.id, s.driveErr, s.frame);
 				StopDrive(s); Free(&s); return false;
 			}
 		} else if (g_drive) Drive(s, s.tr);
@@ -1021,7 +1039,7 @@ static bool Step(Session& s) {
 		const bool agony = s.knock && !s.unconscious && g_x.knockAgony && (s.knockState != 3 || g_x.knockOutAgony);
 		if (s.drown ? s.simTime >= g_x.drownSeconds + 6.0f : agony ? s.simTime >= 60.0f : (s.calmT >= g_x.restSeconds || s.simTime >= g_simSeconds)) {
 			Free(&s);
-			if (s.mode == 1) { StopDrive(s); Log("observe[%u]: at rest after %u frames, the game's bodies carry on from here", s.id, s.frame); return false; }
+			if (s.mode == 1) { s.endWhy = "coming to rest"; StopDrive(s); Log("observe[%u]: at rest after %u frames, the game's bodies carry on from here", s.id, s.frame); return false; }
 			if ((g_release || (g_probe && s.id <= 2)) && !s.cos.empty()) {                                    // hand the resting corpse to the game: its bodies become simulated again, so it can be grabbed and dragged like a vanilla one
 				int n = 0; g_ours = 1; for (uint32_t co : s.cos) if (GameSetMotionType(co, 1)) n++; g_ours = 0;
 				Log("observe[%u]: at rest after %u frames, released %d game bodies back to simulation", s.id, s.frame, n);
@@ -1040,13 +1058,14 @@ static bool Step(Session& s) {
 }
 
 void ObserveReset() {
-	g_recentKnock.clear(); g_refusedLarge.clear();                                          // save load, new game, exit to menu: every actor pointer we hold becomes invalid
+	g_dyingSince.clear(); g_recentKnock.clear(); g_refusedLarge.clear();                                          // save load, new game, exit to menu: every actor pointer we hold becomes invalid
 	for (Session* s : g_active) { Free(s); delete s; }
 	if (!g_active.empty()) Log("observe: game state changed, released %u sessions", (unsigned)g_active.size());
 	g_active.clear(); g_recent.clear(); g_qr = g_qw; g_lastQ = 0; g_lastDmgActor = 0;
 }
 
 static void PerfLog(const Session& s) {
+	Log("observe[%u]: summary: ended by %s after %.1f s of simulation (%u frames); kill impulse x%.2f, peak speed %.1f m/s, %d resyncs, %d ground refreshes, %d shots%s", s.id, s.endWhy ? s.endWhy : "a game state change or reload", s.simTime, s.frame, s.impScale, s.peakSpeed, s.resyncs, s.nGround, s.hits, s.knock ? (s.unconscious ? ", unconscious" : ", knocked down") : "");
 	if (g_x.profile && s.costN) Log("perf[%u]: %u frames, plugin cost avg %.3f ms, max %.2f ms; start-up: Begin %.1f ms, engine %.1f ms", s.id, s.costN, s.costSum / s.costN, s.costMax, s.beginMs, s.startMs);
 }
 static void PollReloadKey() {
@@ -1078,6 +1097,7 @@ static void KnockCheck(uint32_t a, std::map<uint32_t, uint32_t>& lastLs) {
 	uint32_t vt = 0, ls = 0xFFFF, pr = 0;
 	if (!Rd(a, &vt, 4) || (vt != 0x1086A6C && vt != 0x10870AC) || !Rd(a + 0x108, &ls, 4)) return;
 	auto it = lastLs.find(a); const uint32_t prev = it == lastLs.end() ? 0xFFFE : it->second; lastLs[a] = ls;
+	if (g_x.deathFallback && (ls == 1 || ls == 2) && prev == 0) g_dyingSince[a] = GetTickCount();
 	for (Session* s : g_active) if (s->actor == a) return;
 	if (ls == 3 || ls == 6) { if (g_x.unconscious && prev != 3 && prev != 6 && prev != 0xFFFE) Begin(a, true, 3); return; }      // went down just now (not one found lying there)
 	if (ls != 0 || !g_x.knockdown || !Rd(a + 0x68, &pr, 4) || pr < 0x10000) return;
@@ -1091,6 +1111,13 @@ static void KnockWatch() {
 	const DWORD now = GetTickCount();
 	for (LONG i = g_pushN > 16 ? g_pushN - 16 : 0; i < g_pushN; i++) if (now - (DWORD)g_pushTick[i & 15] < 3000) KnockCheck((uint32_t)g_pushActor[i & 15], lastLs);
 	if (++tick % 6) return;
+	for (auto it = g_dyingSince.begin(); it != g_dyingSince.end();) {                               // died with no damage event (console, script, fall, poison): start from the life state
+		if (now - it->second < 300) { ++it; continue; }
+		const uint32_t a = it->first; it = g_dyingSince.erase(it);
+		uint32_t ls = 0xFFFF; bool busy = false; for (Session* s : g_active) if (s->actor == a) busy = true;
+		auto rc = g_recent.find(a);
+		if (!busy && (rc == g_recent.end() || now - rc->second > 5000) && Rd(a + 0x108, &ls, 4) && (ls == 1 || ls == 2)) { static int said = 0; if (said++ < 8) Log("observe: actor %08X died without a kill burst, starting Delirium from its life state", a); Begin(a, false, 0, true); }
+	}
 	uint32_t list[256]; const int n = ProcessActors(list, 256);
 	if (said < 3 && n > 0) { said++; Log("observe: scanning %d actors from the game's actor list", n); }
 	for (int k = 0; k < n; k++) KnockCheck(list[k], lastLs);
@@ -1113,7 +1140,7 @@ static void PlayerWatch() {
 	const DWORD dt = now - deathTick;
 	if (!forced && g_x.playerDeath && g_x.playerFallback && dt > 300) {
 		forced = true;
-		if (g_recent.find(pl) == g_recent.end()) { Log("player: no kill burst was seen, starting Delirium from the life state"); Begin(pl); }
+		if (g_recent.find(pl) == g_recent.end()) { Log("player: no kill burst was seen (a console or script kill?), starting Delirium from the life state"); Begin(pl, false, 0, true); }
 	}
 	if (!reported && dt > 1500) {
 		reported = true;

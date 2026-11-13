@@ -52,7 +52,7 @@ struct ExtraCfg {
 	float maxDistance = 4000.0f;         // game units; corpses farther from the player are left to the game (0 = no limit)
 	float minFps = 25.0f;                // below this frame rate new corpses are left to the game (0 = off)
 	bool profile = true;                 // log what each corpse cost
-	bool playerFallback = false;         // start the player from the life state when no kill burst was seen (experimental: the game may be tearing the body down)
+	bool playerFallback = true;          // start the player from the life state when no kill burst was seen (experimental: the game may be tearing the body down)
 	bool knockAgony = true, knockOutAgony = true;   // a knocked-down actor keeps writhing, pedalling and curling on the floor until the game gets it up (knocked out too, unless KnockOutAgony=0)
 	float knockAgonySeconds = 3.0f, knockAgonyPause = 0.5f;   // length of one writhing spell, limp pause between spells
 	bool creatures = true;               // actors of the Creature class (ghouls, mutants, ...) may get Delirium
@@ -63,8 +63,11 @@ struct ExtraCfg {
 	bool drown = true; float drownDepth = 0.9f, drownSeconds = 6.0f, drownBuoyancy = 0.92f, drownDrag = 2.0f;   // actors that die in water: depth of the feet below the surface (m), struggle time, how much of gravity the water cancels, drag
 	bool shotReact = true; float shotRapidWindow = 0.35f, shotExtend = 1.5f, shotMaxExtend = 4.0f, shotShorten = 0.35f, shotPush = 12.0f;   // shooting an actor that is dying on its feet
 	bool tapImpulses = true; float tapFeed = 1.0f, tapMin = 0.05f;   // impulses the game applies to a Delirium body (bullets, other mods) are fed into the simulation
-	bool resync = true; float resyncMean = 20.0f, resyncMax = 35.0f, resyncGap = 0.25f, resyncKeep = 0.75f; int resyncGiveUp = 14;   // when the game's bodies are held back (a wall), the simulation is moved to where they really are
+	bool resync = true; float resyncMean = 25.0f, resyncMax = 60.0f, resyncGap = 0.25f, resyncKeep = 0.75f; int resyncGiveUp = 14;   // when the game's bodies are held back (a wall), the simulation is moved to where they really are
 	bool groundFollow = true; float groundFollowDist = 0.45f;   // the ground mesh is rebuilt around the body as it moves (stairs, slopes)
+	float impulsePlayer = 1.0f, maxLaunchSpeed = 35.0f, blastSpeed = 14.0f;   // the player's own kill impulse multiplier; no body part leaves faster than this (m/s); without weapon data a kill faster than blastSpeed counts as a blast
+	bool deathFallback = true, playerDeathCam = true;   // actors that die without a damage event (console kill, script, poison) start from the life state; a first-person player death switches to the third-person camera
+	float resyncMin = 12.0f;                     // the worst-body test of the resync only counts when the mean error is at least this
 	bool hitData = true;                 // read the game's hit data (hit location, weapon) when an actor is damaged
 	char fireWeapons[160] = "";          // FormIDs (hex, comma separated) of weapons whose hits set an actor on fire; the log lists the weapon of every hit
 	char shockWeapons[160] = "";         // FormIDs of weapons whose hits electrocute

@@ -85,10 +85,10 @@ static volatile LONG g_impN, g_driven, g_impMotion[256], g_impTick[256]; static 
 // look through the stack for a pointer to something shaped like that and aimed at this actor.
 static void ScanHitData(uint32_t actor, const uint32_t* stack, DWORD now) {
 	const uint32_t attacker = stack[3];
-	for (int k = 4; k < 4 + 320; k++) {
+	for (int k = 4; k < 4 + 400; k++) {
 		uint32_t p = 0; if (!Rd((uint32_t)(uintptr_t)&stack[k], &p, 4)) break; if (p < 0x10000 || (p & 3)) continue;
 		uint32_t h[0x19]; if (!Rd(p, h, sizeof h)) continue;
-		if (h[1] != actor || h[0] != attacker || h[3] > 40) continue;                                  // target, aggressor, a plausible hit location
+		if (h[1] != actor || (attacker && h[0] && h[0] != attacker) || h[3] > 40 || (h[12] && h[12] < 0x10000)) continue;                                  // target, aggressor, a plausible hit location
 		uint32_t wf = 0; uint8_t wt = 0xFF; if (h[12] > 0x10000) { Rd(h[12] + 0xC, &wf, 4); Rd(h[12] + 0xF4, &wt, 1); }
 		LONG i = (InterlockedIncrement(&g_hdN) - 1) & 31;
 		g_hdActor[i] = (LONG)actor; g_hdTick[i] = (LONG)now; g_hdLoc[i] = (LONG)h[3]; g_hdFlags[i] = (LONG)h[4]; g_hdWeap[i] = (LONG)wf; g_hdWType[i] = (LONG)(signed char)wt;
@@ -242,7 +242,7 @@ static bool CalibrateRays(const Session& s) {
 		int pick = -1;
 		for (int pass = 0; pass < 2 && pick < 0; pass++)
 			for (int l = 1; l < 64 && pick < 0; l++) { const LayerRes& x = res[l]; if (x.ok && x.floorHit && std::fabs(x.z - r[2]) <= 25.0f && x.nz > 0.5f && (pass == 1 || !x.bodyHit)) pick = l; }
-		if (pick < 0) { Log("ray: no layer gave a plausible floor under the feet, ground collision stays off"); return true; }
+		if (pick < 0) { g_groundFilter = 0x011F0025u; g_groundReady = true; Log("ray: no layer gave a plausible floor under the feet (the actor was probably in the air or thrown): using the default ground layer 25 for now, calibration is tried again on a later kill"); return false; }
 		g_groundFilter = 0x011F0000u | (uint32_t)pick; g_groundReady = true; Log("ray: ground layer %02X chosen (floor z %.1f vs root z %.1f%s)", pick, res[pick].z, r[2], res[pick].bodyHit ? ", also sees the body" : "");
 	}
 	return true;
@@ -392,7 +392,7 @@ static void Begin(uint32_t actor, bool knock = false, int knockState = 0, bool n
 		const float* r = s->rootW.T; const float from[3] = { r[0], r[1], r[2] + 20.0f }, to[3] = { r[0], r[1], r[2] - 6000.0f }; bool hit = false; float fr = 1, nrm[3] = {};
 		if (PickCast(from, to, g_groundFilter, hit, fr, nrm) && hit) { const float drop = 20.0f + fr * 6020.0f - 20.0f; if (drop > g_x.fallMinHeight) s->floorDrop = drop * kUnit; }
 	}
-	if ((g_calibrate || (g_worldCollision && g_groundAuto)) && !g_calibDone && PickWorld()) { bool done = CalibrateRays(*s); if (done || ++g_calibTries >= 3) g_calibDone = true; }   // retried on later kills until it has run
+	if ((g_calibrate || (g_worldCollision && g_groundAuto)) && !g_calibDone && PickWorld()) { bool done = CalibrateRays(*s); if (done || ++g_calibTries >= 6) g_calibDone = true; }   // retried on later kills until it has run
 	
 	if (g_worldCollision && PickWorld() && g_groundReady && s->floorDrop <= 0.0f) { s->ground = new GroundGrid(); GroundInit(*s->ground, 0, 0, g_groundCell, g_groundHalf, -1.0f, 0.9f); }
 	LARGE_INTEGER c; QueryPerformanceCounter(&c); s->t0 = c; s->last = c; s->phase = 1;

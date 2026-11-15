@@ -30,7 +30,8 @@ static double NowMs() { static double inv = 0; LARGE_INTEGER c; if (!inv) { LARG
 static std::vector<std::string> Split(const char* csv) { std::vector<std::string> r; std::string cur; for (const char* p = csv; ; p++) { if (*p == ',' || !*p) { if (!cur.empty()) r.push_back(cur); cur.clear(); if (!*p) break; } else if (*p != ' ') cur += (char)tolower((unsigned char)*p); } return r; }
 static std::vector<uint32_t> g_fireW, g_shockW;
 static std::vector<uint32_t> HexList(const char* csv) { std::vector<uint32_t> r; for (const std::string& t : Split(csv)) { char* e = nullptr; const unsigned long v = strtoul(t.c_str(), &e, 16); if (e != t.c_str() && v) r.push_back((uint32_t)v); } return r; }
-void ObserveSetExtra(const ExtraCfg& c) { g_x = c; g_burnKw = Split(c.burnKeywords); g_shockKw = Split(c.shockKeywords); g_fireW = HexList(c.fireWeapons); g_shockW = HexList(c.shockWeapons); }
+static bool g_gsDirty = true;   // the game settings are (re)applied: after an ini reload and after a load
+void ObserveSetExtra(const ExtraCfg& c) { g_gsDirty = true; g_x = c; g_burnKw = Split(c.burnKeywords); g_shockKw = Split(c.shockKeywords); g_fireW = HexList(c.fireWeapons); g_shockW = HexList(c.shockWeapons); }
 void ObserveSetReloadHook(void (*fn)(), int vk) { g_reloadFn = fn; g_reloadVk = vk; }
 static bool g_hitLoc = true; static float g_hitMin = 1.0f, g_mulHead = 0.0f, g_mulTorso = 1.0f, g_mulPelvis = 0.8f, g_mulLeg = 0.4f, g_mulArm = 1.3f;
 static bool g_driveBodies = true; static float g_driveGain = 1.0f, g_driveMax = 8.0f, g_driveAngGain = 0.4f;
@@ -69,6 +70,17 @@ static bool AttackerPos(uint32_t victim, float out[3]) {
 		return Rd(a + 0x30, out, 12);
 	}
 	return false;
+}
+// Where actors were a moment ago, so a running actor that dies keeps its running speed.
+struct PosSample { float x, y, z, vx, vy; DWORD t, vt; };
+static std::map<uint32_t, PosSample> g_pos;
+static void SamplePos(uint32_t a, DWORD now) {
+	float p[3]; if (!Rd(a + 0x30, p, 12)) return;
+	auto it = g_pos.find(a);
+	if (it == g_pos.end()) { g_pos[a] = PosSample{ p[0], p[1], p[2], 0, 0, now, 0 }; return; }
+	PosSample& s = it->second; const float dt = (float)(now - s.t) * 0.001f; if (dt < 0.04f) return;
+	if (dt < 0.6f) { const float vx = (p[0] - s.x) / dt * kUnit, vy = (p[1] - s.y) / dt * kUnit; if (std::sqrt(vx * vx + vy * vy) < 40.0f) { s.vx = vx; s.vy = vy; s.vt = now; } }   // a teleport is not a speed
+	s.x = p[0]; s.y = p[1]; s.z = p[2]; s.t = now;
 }
 static float DistToPlayer(uint32_t actor) { uint32_t pl = 0; float ap[3], pp[3]; if (Rd(0x011DEA3C, &pl, 4) && pl && Rd(actor + 0x30, ap, 12) && Rd(pl + 0x30, pp, 12)) { const float dx = ap[0] - pp[0], dy = ap[1] - pp[1], dz = ap[2] - pp[2]; return std::sqrt(dx * dx + dy * dy + dz * dz); } return -1.0f; }
 static int DamageTicks(uint32_t actor, DWORD windowMs) { DWORD now = GetTickCount(); int n = 0; LONG top = g_dmgN; for (LONG i = top > 64 ? top - 64 : 0; i < top; i++) if ((uint32_t)g_dmgActor[i & 63] == actor && now - (DWORD)g_dmgTick[i & 63] <= windowMs) n++; return n; }
@@ -128,7 +140,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 struct Session {
 	double stageMs[3] = { 0, 0, 0 };                              // start-up timings
 	float lastHitT = -9, lastImpT = -9, extended = 0; int hits = 0, hitWType = -1; LONG impSeen = 0; DWORD startTick = 0, dmgSeen = 0;   // shooting it while it is dying; the weapon type of the killing hit
-	bool needDynamic = false, resyncArmed = true, pendShorten = false; float shortenAt = 0, peakSpeed = 0, impScale = 1; int driveWorstPart = -1, nGround = 0; const char* endWhy = nullptr;   // death fallback; resync hysteresis; deferred shortening; the end-of-session summary
+	float shakeSign = 1.0f; bool needDynamic = false, resyncArmed = true, pendShorten = false; float shortenAt = 0, peakSpeed = 0, impScale = 1; int driveWorstPart = -1, nGround = 0; const char* endWhy = nullptr;   // death fallback; resync hysteresis; deferred shortening; the end-of-session summary
 	float driveMaxErr = 0, lastResync = -9, gRef = 0, gcx = 0, gcy = 0, gLow = 0, gLast = -9; int errFrames = 0, resyncs = 0; unsigned gHits0 = 0; bool meshed = false; GroundGrid* gnext = nullptr;   // blocked-body resync, ground following
 	bool drown = false; float waterZ = 0;                       // died in water
 	uint32_t unconState = 3; bool hitFire = false, hitShock = false; int hitLoc = -1;   // life state it went down with (3 unconscious, 6 essential down); the game's hit data
@@ -655,6 +667,17 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 	bool drowning = false; float waterZ = 0;
 	if (g_x.drown && !s.knock) { uint32_t rs = 0; float wh = -3.4e38f; if (Rd(s.actor + 0x64, &rs, 4) && rs) Rd(rs + 8, &wh, 4); if (wh > -1.0e30f && s.rootW.T[2] < wh - g_x.drownDepth / kUnit) { drowning = true; waterZ = wh; } }
 	const float regionMul = located ? RegionMul(hitPart) : 1.0f;
+	if (g_x.momentum > 0.0f && !s.knock) {                                                         // the speed it was running at: only what the game's own ragdoll did not already carry over is added
+		auto pit = g_pos.find(s.actor);
+		if (pit != g_pos.end() && GetTickCount() - pit->second.vt < 1500) {
+			const V3 mr = mulMTV(s.rootW.R, V3{ pit->second.vx, pit->second.vy, 0.0f });
+			const V3 d{ mr.x - vMean.x, mr.y - vMean.y, 0.0f };
+			if (d.x * mr.x + d.y * mr.y > 0.0f && len(mr) > 0.3f) {
+				for (int i = 0; i < 21; i++) rv[i] = rv[i] + d * g_x.momentum;
+				if (s.verbose) Log("observe[%u]: it was running at %.1f m/s: that speed is carried into the ragdoll (+%.1f m/s on top of what the game kept)", s.id, len(mr), len(d) * g_x.momentum);
+			}
+		}
+	}
 	const bool willBalance = !drowning && !s.knock && g_balance && !s.headGone && !s.legGone && chestSpeed <= g_balanceMaxSpeed && regionMul > 0.0f;
 	const float bf = willBalance ? g_balanceVelScale : 1.0f, vs = g_velScale * bf;                       // a body that is meant to stay up inherits less of the kill's motion
 	for (int i = 0; i < 21; i++) {
@@ -841,7 +864,14 @@ static void ShotEvent(Session& s, const char* via) {
 	if (!g_x.shotReact) return;
 	const bool first = s.hits == 0; const float gap = first ? 99.0f : s.rt - s.lastHitT; s.lastHitT = s.rt; s.hits++;
 	if (s.balancing && !s.relaxed) {
-		if (!first && gap <= g_x.shotRapidWindow) { const float add = std::min(g_x.shotExtend, g_x.shotMaxExtend - s.extended); if (add > 0) { s.balanceFor += add; s.extended += add; } }
+		if (!first && gap <= g_x.shotRapidWindow) {
+			const float add = std::min(g_x.shotExtend, g_x.shotMaxExtend - s.extended); if (add > 0) { s.balanceFor += add; s.extended += add; }
+			float ap[3], vp[3];                                                                    // the chest is twisted sideways, alternately, by each shot of the burst
+			if (g_x.shotShake > 0.0f && AttackerPos(s.actor, ap) && Rd(s.actor + 0x30, vp, 12)) {
+				const float dx = vp[0] - ap[0], dy = vp[1] - ap[1], l = std::sqrt(dx * dx + dy * dy);
+				if (l > 1.0f) { s.shakeSign = -s.shakeSign; const V3 lat = mulMTV(s.rootW.R, V3{ -dy / l, dx / l, 0.0f }) * (g_x.shotShake * s.shakeSign); const float at[3] = { s.tr[70], s.tr[71], s.tr[72] }, J[3] = { lat.x, lat.y, lat.z }; g_api->nm_agent_apply_impulse(s.agent, 10, at, J); }
+			}
+		}
 		s.pendShorten = true; s.shortenAt = s.rt + g_x.shotRapidWindow;                              // brought down sooner unless another shot follows within the window
 	}
 	static int said = 0; if (said++ < 12) Log("observe[%u]: shot again in the Delirium state (%s), hit %d, %s, standing until %.1f s (%s)", s.id, via, s.hits, first ? "the first" : (std::to_string(gap) + " s after the last").c_str(), s.balanceFor, (s.balancing && !s.relaxed) ? "still up" : "already down");
@@ -1058,7 +1088,7 @@ static bool Step(Session& s) {
 }
 
 void ObserveReset() {
-	g_dyingSince.clear(); g_recentKnock.clear(); g_refusedLarge.clear();                                          // save load, new game, exit to menu: every actor pointer we hold becomes invalid
+	g_pos.clear(); g_gsDirty = true; g_dyingSince.clear(); g_recentKnock.clear(); g_refusedLarge.clear();                                          // save load, new game, exit to menu: every actor pointer we hold becomes invalid
 	for (Session* s : g_active) { Free(s); delete s; }
 	if (!g_active.empty()) Log("observe: game state changed, released %u sessions", (unsigned)g_active.size());
 	g_active.clear(); g_recent.clear(); g_qr = g_qw; g_lastQ = 0; g_lastDmgActor = 0;
@@ -1098,6 +1128,7 @@ static void KnockCheck(uint32_t a, std::map<uint32_t, uint32_t>& lastLs) {
 	if (!Rd(a, &vt, 4) || (vt != 0x1086A6C && vt != 0x10870AC) || !Rd(a + 0x108, &ls, 4)) return;
 	auto it = lastLs.find(a); const uint32_t prev = it == lastLs.end() ? 0xFFFE : it->second; lastLs[a] = ls;
 	if (g_x.deathFallback && (ls == 1 || ls == 2) && prev == 0) g_dyingSince[a] = GetTickCount();
+	if (ls == 0) SamplePos(a, GetTickCount());
 	for (Session* s : g_active) if (s->actor == a) return;
 	if (ls == 3 || ls == 6) { if (g_x.unconscious && prev != 3 && prev != 6 && prev != 0xFFFE) Begin(a, true, 3); return; }      // went down just now (not one found lying there)
 	if (ls != 0 || !g_x.knockdown || !Rd(a + 0x68, &pr, 4) || pr < 0x10000) return;
@@ -1121,6 +1152,27 @@ static void KnockWatch() {
 	uint32_t list[256]; const int n = ProcessActors(list, 256);
 	if (said < 3 && n > 0) { said++; Log("observe: scanning %d actors from the game's actor list", n); }
 	for (int k = 0; k < n; k++) KnockCheck(list[k], lastLs);
+}
+
+
+// The game's own settings (Setting objects: vtable, value at +4, key string at +8), written the way NVSE's SetNumericGameSetting does. The key is checked before anything is written.
+static bool ApplyGameSettings() {
+	struct G { const char* name; uint32_t addr; float base, last; bool applied; };
+	static G g[6] = { { "fExplosionForceMultLinear", 0x11CFF64, 0, 0, false }, { "fExplosionForceMultAngular", 0x11D02EC, 0, 0, false }, { "fGameplayImpulseMultBiped", 0x11D0574, 0, 0, false },
+		{ "fBuoyancyMultBody", 0x11D0E64, 0, 0, false }, { "fBuoyancyMultExtremity", 0x11D00CC, 0, 0, false }, { "fZKeyComplexHelperWeightMax", 0x11D037C, 0, 0, false } };
+	const float m[6] = { g_x.explosionForce, g_x.explosionForceAngular, g_x.projectileForce, g_x.bodyBuoyancy, g_x.limbBuoyancy, g_x.grabStrength };
+	bool ready = true;
+	for (int i = 0; i < 6; i++) {
+		uint32_t key = 0; char nm[40] = {}; float cur = 0;
+		if (!Rd(g[i].addr + 8, &key, 4) || key < 0x10000 || !Rd(key, nm, 39) || strcmp(nm, g[i].name) != 0 || !Rd(g[i].addr + 4, &cur, 4)) { ready = false; continue; }
+		if (!g[i].applied || cur != g[i].last) g[i].base = cur;                                    // first time, or another mod changed it: that value is the base
+		if (m[i] == 1.0f && !g[i].applied) continue;                                               // never touched, nothing asked for
+		const float v = g[i].base * m[i];
+		if (v != cur) Wr(g[i].addr + 4, &v, 4);
+		if (!g[i].applied || v != g[i].last) Log("game setting %s: %g (as the game loaded it) -> %g", g[i].name, g[i].base, v);
+		g[i].last = v; g[i].applied = true;
+	}
+	return ready;
 }
 
 // The player: log what the game does when the player dies, and start Delirium from the life state when no kill burst was seen.
@@ -1164,6 +1216,8 @@ void ObserveTick() {
 	KnockWatch();
 	while (g_qr != g_qw) { uint32_t a = (uint32_t)g_q[g_qr & 15]; g_qr++; Begin(a); }
 	static bool compat = false; if (!compat) { compat = true; if (GetModuleHandleA("InvoluntaryDischargeNVSE.dll")) Log("compat: Involuntary Discharge is loaded: its patches (Actor::Kill, DamageEquipment) do not overlap our hooks, and the recoil it applies to a body is fed into the Delirium simulation (TapImpulses=1)"); }
+	{ static unsigned pst = 0; uint32_t pl = 0, pls = 1; if (++pst % 3 == 0 && Rd(0x011DEA3C, &pl, 4) && pl && Rd(pl + 0x108, &pls, 4) && pls == 0) SamplePos(pl, GetTickCount()); if (g_pos.size() > 800) g_pos.clear(); }
+	static unsigned gsTick = 0; if (g_gsDirty && ++gsTick % 30 == 0) { if (ApplyGameSettings()) g_gsDirty = false; }
 	g_frameMs = 0; g_driven = 0; for (Session* a : g_active) if (a->mode == 1 && !a->dbodies.empty()) g_driven++;
 	for (size_t i = 0; i < g_active.size();) {
 		const double s0 = NowMs(); const bool keep = Step(*g_active[i]); const double c = NowMs() - s0;

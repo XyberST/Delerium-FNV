@@ -58,7 +58,7 @@ struct ExtraCfg {
 	bool creatures = true;               // actors of the Creature class (ghouls, mutants, ...) may get Delirium
 	bool largeActors = true;             // actors much bigger than a human (super mutants) may get Delirium: the rig was made for a human skeleton
 	float largeScale = 1.2f;             // leg bone length relative to the player's above which an actor counts as large
-	float impulseAll = 1.0f, impulseBullet = 1.0f, impulseMelee = 1.0f, impulseExplosion = 3.0f, impulseKnock = 1.0f, impulseOther = 1.0f;   // multipliers on the motion the game gives a body when it dies or is knocked down
+	float impulseAll = 1.0f, impulseBullet = 1.0f, impulseMelee = 1.0f, impulseExplosion = 1.0f, impulseKnock = 1.0f, impulseOther = 1.0f;   // multipliers on the motion the game gives a body when it dies or is knocked down
 	bool fetalAgony = true, holdGut = true;      // knocked-down / unconscious actors curl up, kick their legs and hold their gut
 	bool drown = true; float drownDepth = 0.9f, drownSeconds = 6.0f, drownBuoyancy = 0.92f, drownDrag = 2.0f;   // actors that die in water: depth of the feet below the surface (m), struggle time, how much of gravity the water cancels, drag
 	bool shotReact = true; float shotRapidWindow = 0.35f, shotExtend = 1.5f, shotMaxExtend = 4.0f, shotShorten = 0.35f, shotPush = 12.0f;   // shooting an actor that is dying on its feet
@@ -68,6 +68,9 @@ struct ExtraCfg {
 	float impulsePlayer = 1.0f, maxLaunchSpeed = 35.0f, blastSpeed = 14.0f;   // the player's own kill impulse multiplier; no body part leaves faster than this (m/s); without weapon data a kill faster than blastSpeed counts as a blast
 	bool deathFallback = true, playerDeathCam = true;   // actors that die without a damage event (console kill, script, poison) start from the life state; a first-person player death switches to the third-person camera
 	float resyncMin = 12.0f;                     // the worst-body test of the resync only counts when the mean error is at least this
+	float explosionForce = 3.0f, explosionForceAngular = 1.0f, projectileForce = 1.0f, bodyBuoyancy = 1.0f, limbBuoyancy = 1.0f, grabStrength = 1.0f;   // multipliers on the game's own settings (explosion force linear/angular, impulse of a bullet on a body, water buoyancy of body/limbs, grab strength)
+	float momentum = 1.0f;                       // a running actor keeps its running speed when it ragdolls (0 = off)
+	float shotShake = 5.0f;                      // each shot of rapid fire on a dying, standing actor twists its chest alternately (kg m/s, 0 = off)
 	bool hitData = true;                 // read the game's hit data (hit location, weapon) when an actor is damaged
 	char fireWeapons[160] = "";          // FormIDs (hex, comma separated) of weapons whose hits set an actor on fire; the log lists the weapon of every hit
 	char shockWeapons[160] = "";         // FormIDs of weapons whose hits electrocute

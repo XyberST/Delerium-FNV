@@ -140,6 +140,7 @@ void ObserveOnHit(int role, uint32_t thisPtr, const uint32_t* stack) {
 struct Session {
 	double stageMs[3] = { 0, 0, 0 };                              // start-up timings
 	float lastHitT = -9, lastImpT = -9, extended = 0; int hits = 0, hitWType = -1; LONG impSeen = 0; DWORD startTick = 0, dmgSeen = 0;   // shooting it while it is dying; the weapon type of the killing hit
+	float gUp = 1.4f, gDown = 1.3f;                           // how far above and below gRef the ground rays reach (the first mesh: 1.4 / 1.3 m, a followed one: 0.5 / 7 m)
 	float shakeSign = 1.0f; bool needDynamic = false, resyncArmed = true, pendShorten = false; float shortenAt = 0, peakSpeed = 0, impScale = 1; int driveWorstPart = -1, nGround = 0; const char* endWhy = nullptr;   // death fallback; resync hysteresis; deferred shortening; the end-of-session summary
 	float driveMaxErr = 0, lastResync = -9, gRef = 0, gcx = 0, gcy = 0, gLow = 0, gLast = -9; int errFrames = 0, resyncs = 0; unsigned gHits0 = 0; bool meshed = false; GroundGrid* gnext = nullptr;   // blocked-body resync, ground following
 	bool drown = false; float waterZ = 0;                       // died in water
@@ -265,7 +266,7 @@ static bool GroundRayCb(void* ctx, float x, float y, float& z) {
 	Session& s = *(Session*)ctx; if (s.groundFailed) return false;
 	const float toUnits = (s.rootW.S != 0 ? s.rootW.S : 1.0f) / kUnit;                  // metres in the root frame -> game units
 	V3 w = mulMV(s.rootW.R, V3{ x * toUnits, y * toUnits, 0 });
-	const float top = s.rootW.T[2] + (s.gRef + 1.4f) * toUnits, bottom = s.rootW.T[2] + (s.gRef - 1.3f) * toUnits;   // from above the head to below the feet
+	const float top = s.rootW.T[2] + (s.gRef + s.gUp) * toUnits, bottom = s.rootW.T[2] + (s.gRef - s.gDown) * toUnits;   // from above the head to below the feet
 	float from[3] = { s.rootW.T[0] + w.x, s.rootW.T[1] + w.y, top }, to[3] = { from[0], from[1], bottom };
 	bool hit = false; float fr = 1, n[3];
 	if (!PickCast(from, to, g_groundFilter, hit, fr, n)) { s.groundFailed = true; return false; }
@@ -699,7 +700,7 @@ static bool StartAgent(Session& s, const V3* p, const Q* q, LARGE_INTEGER c, flo
 		else {
 			std::vector<float> pos; std::vector<uint32_t> tri; float low = GroundMesh(*s.ground, 0.0f, pos, tri);
 			if (g_api->nm_world_add_mesh(s.world, pos.data(), (int)pos.size() / 3, tri.data(), (int)tri.size() / 3, nullptr) == 0) {
-				g_api->nm_world_add_floor(s.world, 0, 0, low - 0.02f, g_x.floorHalfMesh); meshed = true; s.meshed = true; s.gLow = low; s.gcx = 0; s.gcy = 0; s.gRef = 0;
+				g_api->nm_world_add_floor(s.world, 0, 0, low - 0.3f, g_x.floorHalfMesh); meshed = true; s.meshed = true; s.gLow = low; s.gcx = 0; s.gcy = 0; s.gRef = 0;
 				if (s.verbose) Log("observe[%u]: ground mesh from %u/%d rays, lowest %.2f m, %d triangles", s.id, s.groundHits, total, low, (int)tri.size() / 3);
 			}
 		}
@@ -927,16 +928,17 @@ static void ResyncAgent(Session& s) {
 // Ground following: a fresh mesh around the body, sampled a few rays a frame, then swapped in for the world (the engine's world is just the collision data passed to each step).
 static void FinishGround(Session& s) {
 	GroundGrid* g = s.gnext; s.gnext = nullptr; if (!g) return;
-	if (s.groundHits - s.gHits0 >= (unsigned)(g->total() / 10)) {
-		std::vector<float> pos; std::vector<uint32_t> tri; const float low = GroundMesh(*g, s.gRef - 0.9f, pos, tri);
+	const int okCells = (int)std::count(g->ok.begin(), g->ok.end(), (uint8_t)1);                    // cells with a ground height inside the window
+	if (okCells >= g->total() * 2 / 5) {                                // a mesh made mostly of guesses would be a floor in mid-air
+		std::vector<float> pos; std::vector<uint32_t> tri; const float low = GroundMesh(*g, s.gRef - s.gDown, pos, tri);
 		NmWorld* w2 = g_api->nm_world_create();
 		if (w2 && g_api->nm_world_add_mesh(w2, pos.data(), (int)pos.size() / 3, tri.data(), (int)tri.size() / 3, nullptr) == 0) {
-			g_api->nm_world_add_floor(w2, g->cx, g->cy, low - 0.02f, g_x.floorHalfMesh);
+			g_api->nm_world_add_floor(w2, g->cx, g->cy, low - 1.2f, g_x.floorHalfMesh);
 			NmWorld* old = s.world; s.world = w2; if (old) g_api->nm_world_destroy(old);
 			s.gcx = g->cx; s.gcy = g->cy; s.gLow = low; s.nGround++;
 			static int said = 0; if (said++ < 12) Log("observe[%u]: ground followed the body: new mesh around (%.1f, %.1f) m, lowest %.2f m, %d triangles", s.id, g->cx, g->cy, low, (int)tri.size() / 3);
 		} else if (w2) g_api->nm_world_destroy(w2);
-	}
+	} else { s.gLast = s.rt + 0.4f; static int said = 0; if (said++ < 12) Log("observe[%u]: no ground under the body yet (%d of %d rays found a surface), keeping the old mesh", s.id, okCells, g->total()); }
 	delete g;
 }
 static void PruneCutOff(Session& s) {
@@ -1031,10 +1033,10 @@ static bool Step(Session& s) {
 					const float px = s.tr[0], py = s.tr[1], pz = s.tr[2], reach = g_groundHalf * g_groundCell, look = 0.4f;
 					float com[3] = { 0, 0, 0 }, cv[3] = { 0, 0, 0 }; g_api->nm_agent_get_com(s.agent, com, cv);                    // where the body is heading, not just where it is
 					const float qx = px + cv[0] * look, qy = py + cv[1] * look, dx = qx - s.gcx, dy = qy - s.gcy;
-					if (std::sqrt(dx * dx + dy * dy) > reach * g_x.groundFollowDist || pz - 0.2f < s.gRef - 0.75f) {
+					if (std::sqrt(dx * dx + dy * dy) > reach * g_x.groundFollowDist || pz < s.gLow - 0.1f) {
 						float cx = qx, cy = qy; { const float ex = cx - px, ey = cy - py, el = std::sqrt(ex * ex + ey * ey), lim = reach * 0.6f; if (el > lim) { cx = px + ex / el * lim; cy = py + ey / el * lim; } }
-						const float zr = pz + std::min(0.0f, cv[2] * look * 0.7f);
-						s.gnext = new GroundGrid(); s.gRef = zr; GroundInit(*s.gnext, cx, cy, g_groundCell, g_groundHalf, zr - 1.0f, zr + 0.9f); s.gHits0 = s.groundHits; s.gLast = s.rt;
+						const float zr = pz; s.gUp = 0.5f; s.gDown = 7.0f;                              // the surface under the body, wherever it is within 7 m, not a floor guessed at the body's own height
+						s.gnext = new GroundGrid(); s.gRef = zr; GroundInit(*s.gnext, cx, cy, g_groundCell, g_groundHalf, zr - 7.0f, zr + 0.4f); s.gHits0 = s.groundHits; s.gLast = s.rt;
 					}
 				}
 			}
